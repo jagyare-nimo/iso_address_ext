@@ -1,0 +1,38 @@
+Byte-compiled Python files
+pycache/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+venv/
+.env
+
+# IDE / editor folders
+.vscode/
+.idea/
+
+# macOS
+.DS\_Store
+
+# H2 database files
+\*.mv.db
+\*.trace.db
+
+# Excel sheets (large test data)
+resources/\*\*/\*.xlsx
+
+# Prefect local files
+.prefect/
+
+# Jupyter
+.ipynb\_checkpoints/
+
+# Logs
+\*.log
+
+# Temporary files
+\*.tmp
+\*\~
+
+# Pytest cache
+.pytest\_cache/

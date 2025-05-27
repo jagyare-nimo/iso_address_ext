@@ -1,0 +1,18 @@
+input_dir: 'resources/ici_sheets/raw'
+
+extracted_dir: 'resources/ici_sheets/output/extracted'
+
+processed_dir: 'resources/ici_sheets/output/processed'
+
+archive:
+  input_dir: 'resources/ici_sheets/archive/raw'
+  processed_dir: 'resources/ici_sheets/archive/processed'
+
+datasource:
+  url: 'jdbc:h2:file:resources/data/ici_extract;MODE=PostgreSQL;DB_CLOSE_ON_EXIT=FALSE'
+  driverClassName: 'org.h2.Driver'
+  username: ''
+  password: ''
+
+database:
+  table_name: 'iso_address'

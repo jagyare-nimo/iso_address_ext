@@ -1,0 +1,10 @@
+pandas~=2.2.3
+jaydebeapi~=1.2.3
+JPype1
+sqlalchemy~=2.0.41
+sqlalchemy-jdbc-generic
+deepparse>=0.9.13
+prefect~=3.4.3
+pyyaml~=6.0.2
+openpyxl
+numpy~=1.26.4
