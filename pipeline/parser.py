@@ -9,16 +9,31 @@ import getpass
 from pathlib import Path
 from prefect import get_run_logger
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import deepparse.weights_tools as _wt
+
+# patch deepparse’s weights upload handler to give a better FileNotFoundError on Windows
+_orig_handle = _wt.handle_weights_upload
+def _fixed_handle_weights_upload(path_to_model_to_upload, device="cpu"):
+    try:
+        return _orig_handle(path_to_model_to_upload, device)
+    except FileNotFoundError as e:
+        msg = str(e)
+        if "AWS S3 URI" in msg:
+            raise FileNotFoundError(f"The file {path_to_model_to_upload} was not found.") from e
+        raise
+_wt.handle_weights_upload = _fixed_handle_weights_upload
+
 from deepparse.parser import AddressParser
 from urllib3.exceptions import SSLError
 from requests.exceptions import SSLError as RequestsSSLError
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
-try:
-    ssl._create_default_https_context = ssl._create_unverified_context
-except Exception:
-    pass
+# Safely hook up an “unverified” SSL context if available, silencing editor/type‐checker errors
+_unverified = getattr(ssl, "_create_unverified_context", None)
+if _unverified is not None:
+    ssl._create_default_https_context = _unverified  # type: ignore[attr-defined]
 
 # Map various country inputs to ISO codes
 _COUNTRY_MAP = {
@@ -38,13 +53,16 @@ _COUNTRY_MAP = {
 
 # Helpers for fallback by state/province
 _US_STATES = {s.lower() for s in [
-    "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA", "HI", "ID", "IL", "IN", "IA", "KS",
-    "KY", "LA", "ME", "MD", "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ", "NM", "NY",
-    "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY"
+    "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA",
+    "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD",
+    "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ",
+    "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC",
+    "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY"
 ]}
 
 _CA_PROVINCES = {p.lower() for p in [
-    "AB", "BC", "MB", "NB", "NL", "NS", "NT", "NU", "ON", "PE", "QC", "SK", "YT"
+    "AB", "BC", "MB", "NB", "NL", "NS", "NT", "NU", "ON",
+    "PE", "QC", "SK", "YT"
 ]}
 
 # UK postcode heuristic
@@ -67,15 +85,15 @@ class AddressParserService:
         cache_dir = Path.home() / ".cache" / "deepparse"
         cache_dir.mkdir(parents=True, exist_ok=True)
 
-        # force an online download of bpemb.ckpt if needed
+        # force an online download of bpemb.ckpt if possible
         try:
             AddressParser(offline=False)
-        except (SSLError, RequestsSSLError):
+        except (SSLError, RequestsSSLError, FileNotFoundError):
             pass
         except Exception:
             pass
 
-        # create offline parser instance
+        # now instantiate offline parser
         self._parser = AddressParser(offline=True)
         self.workers = workers or os.cpu_count()
 
@@ -105,7 +123,6 @@ class AddressParserService:
                 str(r.get('ADDRESSLINE3', '')).strip()
             ]
             return ', '.join(p for p in parts if p)
-
         df['full_address'] = df.apply(join_lines, axis=1)
 
         # 3) Batch up for multithreading
@@ -125,7 +142,7 @@ class AddressParserService:
                 for idx, pdict in fut.result():
                     all_dicts[idx] = pdict
 
-        # 5) Assemble records, *override* city/state/postcode from raw second line
+        # 5) Assemble records, overriding city/state/postcode from ADDRESSLINE2
         records = []
         ts = datetime.datetime.utcnow().isoformat() + 'Z'
         stem = Path(extracted_path).stem
@@ -136,35 +153,37 @@ class AddressParserService:
         for i, row in df.iterrows():
             d = all_dicts.get(i, {})
 
-            # status logic
+            # status
             id_val = row.get('ID')
-            lines = [row.get('ADDRESSLINE1', ''),
-                     row.get('ADDRESSLINE2', ''),
-                     row.get('ADDRESSLINE3', '')]
-            if pd.isna(id_val) or not str(id_val).strip() \
-                    or all(not str(x).strip() for x in lines):
+            lines = [
+                row.get('ADDRESSLINE1', ''),
+                row.get('ADDRESSLINE2', ''),
+                row.get('ADDRESSLINE3', '')
+            ]
+            if pd.isna(id_val) or not str(id_val).strip() or all(not str(x).strip() for x in lines):
                 status = 'INVALID'
             elif all(str(x).strip() for x in lines):
                 status = 'PERFECT'
             else:
                 status = 'PARTIAL'
 
-            # first map country (from parsed or 3rd line)
+            # country from parsed or line3 fallback
             country_raw = (d.get('country') or d.get('Country') or '').strip().lower()
             country = _COUNTRY_MAP.get(country_raw, '')
             if not country and row.get('ADDRESSLINE3'):
                 country = _COUNTRY_MAP.get(str(row['ADDRESSLINE3']).strip().lower(), '')
-            # fallback by state code if still empty
+
+            # fallback by parsed state
             state_guess = (d.get('state') or d.get('Province') or '').strip().lower()
             if not country and state_guess in _US_STATES:
                 country = 'US'
             if not country and state_guess in _CA_PROVINCES:
                 country = 'CA'
-            # UK‐postcode heuristic
+            # UK postcode heuristic
             if not country and _UK_PC.search(row['full_address']):
                 country = 'GB'
 
-            # now override city/state/postcode from raw ADDRESSLINE2
+            # override city/state/postcode from raw ADDRESSLINE2
             raw2 = str(row.get('ADDRESSLINE2', '')).strip()
             if ',' in raw2:
                 city_part, rest = [p.strip() for p in raw2.split(',', 1)]
@@ -172,7 +191,6 @@ class AddressParserService:
                 state_part = parts[0] if parts else ''
                 pcode_part = parts[1] if len(parts) > 1 else ''
             else:
-                # e.g. UK/DE/FR = "City PCode"
                 parts = raw2.rsplit(None, 1)
                 if len(parts) == 2:
                     city_part, pcode_part = parts
