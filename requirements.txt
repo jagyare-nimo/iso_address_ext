@@ -10,3 +10,5 @@ openpyxl
 numpy~=1.26.4
 psycopg2
 pytest>=7.0.0
+urllib3~=2.4.0
+requests~=2.32.3

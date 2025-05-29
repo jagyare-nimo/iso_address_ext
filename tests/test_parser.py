@@ -49,7 +49,7 @@ class TestAddressParserService(unittest.TestCase):
 
         self.assertEqual(len(out_df), 3)
 
-        self.assertTrue((out_df['extracted_by'] == 'tester').all())
+        self.assertTrue((out_df['extracted_by'] == 'TESTER').all())
 
         self.assertTrue(Path(out_path).exists())
         self.assertTrue(str(out_path).endswith('.xlsx'))
