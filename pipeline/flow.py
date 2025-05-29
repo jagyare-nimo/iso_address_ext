@@ -1,4 +1,3 @@
-import os
 import warnings
 from pathlib import Path
 from prefect import flow, get_run_logger
@@ -14,55 +13,41 @@ warnings.filterwarnings("ignore", category=UserWarning)
 
 @flow(name="DeepParse Workflow")
 def deepparse_flow(config_path: str = None):
-    logger = get_run_logger()
+    config_dir = Config(path=config_path) if config_path else Config()
 
-    config_file = (
-        Path(config_path)
-        if config_path
-        else Path(__file__).resolve().parents[1] / "resources" / "config.yml"
-    )
-    config_path = Config(str(config_file))
+    for dirs in [
+        config_dir.input_dir,
+        config_dir.extracted_dir,
+        config_dir.processed_dir,
+        config_dir.archive_input_dir,
+        config_dir.archive_processed_dir
+    ]:
+        Path(dirs).mkdir(parents=True, exist_ok=True)
 
-    for dirs in (
-            config_path.input_dir,
-            config_path.extracted_dir,
-            config_path.processed_dir,
-            config_path.archive_input_dir,
-            config_path.archive_processed_dir,
-    ):
-        os.makedirs(dirs, exist_ok=True)
-
-    extractor = ExcelExtractor(config_path.input_dir, config_path.extracted_dir)
+    extractor = ExcelExtractor(config_dir.input_dir, config_dir.extracted_dir)
     parser_svc = AddressParserService()
-    repo = DatabaseRepository(
-        table_name=config_path.table_name,
-        datasource_url=config_path.datasource_url,
-        driver_class=config_path.datasource_driver,
-        username=config_path.datasource_username,
-        password=config_path.datasource_password,
-        jar_path=str(Path(__file__).resolve().parents[1] / "resources" / "data" / "h2-2.3.232.jar")
-    )
+    repo = DatabaseRepository(config=config_dir)
     archiver = Archiver(
-        config_path.input_dir,
-        config_path.archive_input_dir,
-        config_path.archive_processed_dir,
+        input_dir=config_dir.input_dir,
+        archive_input_dir=config_dir.archive_input_dir,
+        archive_processed_dir=config_dir.archive_processed_dir
     )
 
+    logger = get_run_logger()
     files = extractor.list_files()
-    logger.info(f"Processing {len(files)} files...")
+    if not files:
+        logger.warning(f"No Excel files found in {config_dir.input_dir}")
+    else:
+        logger.info(f"Processing {len(files)} files...")
 
-    for file in files:
-        extracted_path = extractor.extract(file)
-        parsed_df, processed_path = parser_svc.parse_file(
-            extracted_path,
-            config_path.processed_dir,
-        )
-
-        logger.info("ISO data for %s:\n%s", file, parsed_df.to_string(index=False))
-
+    for filename in files:
+        extracted_path = extractor.extract(filename)
+        parsed_df, processed_path = parser_svc.parse_file(extracted_path, config_dir.processed_dir)
         repo.save(parsed_df)
-        archiver.archive(file, processed_path)
-        logger.info(f"Completed {file}")
+
+        archiver.archive(filename, processed_path)
+
+        logger.info(f"Completed file: {filename}")
 
 
 if __name__ == "__main__":

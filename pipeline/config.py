@@ -3,23 +3,43 @@ from pathlib import Path
 
 
 class Config:
+
     def __init__(self, path: str = None):
-        config_path = Path(path) if path else Path(__file__).resolve().parents[1] / 'resources' / 'config.yml'
+        project_root = Path(__file__).resolve().parents[1]
+        if path:
+            config_path = Path(path)
+        else:
+            config_path = project_root / 'resources' / 'config.yml'
         if not config_path.is_file():
             raise FileNotFoundError(f"Config not found at {config_path}")
-        config_file = yaml.safe_load(config_path.read_text())
 
-        self.input_dir = config_file['input_dir']
-        self.extracted_dir = config_file['extracted_dir']
-        self.processed_dir = config_file['processed_dir']
-        self.archive_input_dir = config_file['archive']['input_dir']
-        self.archive_processed_dir = config_file['archive']['processed_dir']
+        config_file = yaml.safe_load(config_path.read_text()) or {}
 
-        datasource = config_file.get('datasource', {})
-        self.datasource_url = datasource.get('url')
-        self.datasource_driver = datasource.get('driverClassName')
-        self.datasource_username = datasource.get('username')
-        self.datasource_password = datasource.get('password')
+        def _resolve(key):
+            val = config_file.get(key, '')
+            return str((project_root / val).resolve()) if val else ''
 
-        database = config_file.get('database', {})
-        self.table_name = database.get('table_name')
+        self.input_dir = _resolve('input_dir')
+        self.extracted_dir = _resolve('extracted_dir')
+        self.processed_dir = _resolve('processed_dir')
+        archive = config_file.get('archive', {}) or {}
+        self.archive_input_dir = str((project_root / archive.get('input_dir', '')).resolve())
+        self.archive_processed_dir = str((project_root / archive.get('processed_dir', '')).resolve())
+
+        datasource = config_file.get('datasource', {}) or {}
+        self.datasource_url = datasource.get('url', '')
+        self.datasource_driver = datasource.get('driverClassName', '')
+        self.datasource_username = datasource.get('username', '')
+        self.datasource_password = datasource.get('password', '')
+
+        database = config_file.get('database', {}) or {}
+        self.database_url = database.get('url', '')
+        self.table_name = database.get('table_name', '')
+
+    def __repr__(self):
+        return (
+            f"<Config input_dir={self.input_dir!r}, extracted_dir={self.extracted_dir!r}, "
+            f"processed_dir={self.processed_dir!r}, archive_input_dir={self.archive_input_dir!r}, "
+            f"archive_processed_dir={self.archive_processed_dir!r}, datasource_url={self.datasource_url!r}, "
+            f"db_url={self.database_url!r}, table_name={self.table_name!r}>"
+        )

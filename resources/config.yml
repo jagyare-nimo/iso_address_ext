@@ -8,11 +8,21 @@ archive:
   input_dir: 'resources/ici_sheets/archive/raw'
   processed_dir: 'resources/ici_sheets/archive/processed'
 
+#datasource:
+#  url: 'jdbc:h2:file:resources/data/ici_extract;MODE=PostgreSQL;DB_CLOSE_ON_EXIT=FALSE'
+#  driverClassName: 'org.h2.Driver'
+#  username: ''
+#  password: ''
+#
+#database:
+#  table_name: 'iso_address'
+
 datasource:
-  url: 'jdbc:h2:file:resources/data/ici_extract;MODE=PostgreSQL;DB_CLOSE_ON_EXIT=FALSE'
-  driverClassName: 'org.h2.Driver'
-  username: ''
+  url: 'jdbc:postgresql://localhost:5432/ICI_EXTRACT'
+  driverClassName: 'org.postgresql.Driver'
+  username: 'postgres'
   password: ''
 
 database:
+  url: 'postgresql://postgres@localhost:5432/ICI_EXTRACT'
   table_name: 'iso_address'

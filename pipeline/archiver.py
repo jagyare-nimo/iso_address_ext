@@ -1,5 +1,6 @@
 import os
 import shutil
+from pathlib import Path
 
 
 class Archiver:
@@ -11,6 +12,15 @@ class Archiver:
         os.makedirs(self.archive_processed_dir, exist_ok=True)
 
     def archive(self, original: str, processed_file: str):
-        shutil.move(os.path.join(self.input_dir, original),
-                    os.path.join(self.archive_input_dir, original))
+        # pull the same timestamp
+        safe_ts = Path(processed_file).stem.split("_")[-1]
+
+        # rename raw to <stem>_<ts><ext>
+        stem, ext = Path(original).stem, Path(original).suffix
+        new_raw = f"{stem}_{safe_ts}{ext}"
+
+        shutil.move(
+            os.path.join(self.input_dir, original),
+            os.path.join(self.archive_input_dir, new_raw)
+        )
         shutil.move(processed_file, self.archive_processed_dir)
