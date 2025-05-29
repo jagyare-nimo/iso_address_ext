@@ -1,90 +1,111 @@
 import unittest
-import tempfile
-import shutil
 import pandas as pd
+from sqlalchemy import create_engine, text
+import tempfile
+import os
 from pathlib import Path
-from unittest.mock import patch
-
+from pipeline.schema import create_iso_address_table
 from pipeline.repository import DatabaseRepository
 
 
-class DummyConn:
+class DummyConfig:
+    """ Minimal config pointing at a file-backed SQLite DB """
 
-    def __init__(self):
-        class Cur:
-            def __init__(self, outer):
-                self.outer = outer
-
-            def execute(self, sql, args=None):
-                self.outer.last_execute = (sql, args)
-
-            def executemany(self, sql, data):
-                self.outer.last_batch = data
-
-        self._cur = Cur(self)
-        self.cursor = self._cur
-        self.last_execute = None
-        self.last_batch = None
-
-    def commit(self):
-        pass
+    def __init__(self, database_url: str, table_name: str):
+        self.database_url = database_url
+        self.table_name = table_name
 
 
 class TestDatabaseRepository(unittest.TestCase):
-
     def setUp(self):
-        self.tmp_dir = tempfile.mkdtemp()
-        self.jar_path = str(Path(self.tmp_dir) / 'h2.jar')
-        Path(self.jar_path).write_text('dummy jar content')
+        self.tmpdir = tempfile.mkdtemp()
+        self.db_path = Path(self.tmpdir) / "test.db"
+        self.db_url = f"sqlite:///{self.db_path}"
+        self.table_name = "iso_address"
 
-        self.conn = DummyConn()
-        self.patcher = patch('pipeline.repository.jaydebeapi.connect', return_value=self.conn)
-        self.mock_connect = self.patcher.start()
+        pre_engine = create_engine(self.db_url)
+        create_iso_address_table(pre_engine)
+        pre_engine.dispose()
 
-        self.repo = DatabaseRepository(
-            table_name='iso_address',
-            datasource_url='jdbc:h2:file:test;MODE=PostgreSQL',
-            driver_class='org.h2.Driver',
-            username='',
-            password='',
-            jar_path=self.jar_path
-        )
+        self.config = DummyConfig(self.db_url, self.table_name)
+        self.repo = DatabaseRepository(self.config)
+
+        self.engine = create_engine(self.db_url)
 
     def tearDown(self):
-        self.patcher.stop()
-        shutil.rmtree(self.tmp_dir)
+        self.engine.dispose()
+        try:
+            os.remove(self.db_path)
+            os.rmdir(self.tmpdir)
+        except OSError:
+            pass
 
-    def test_init_creates_table(self):
-        sql, params = self.conn.last_execute
-        self.assertIn('CREATE TABLE IF NOT EXISTS iso_address', sql)
-        self.assertIsNone(params)
+    def _count_rows(self):
+        with self.engine.begin() as conn:
+            return conn.execute(text(f"SELECT COUNT(*) FROM {self.table_name}")).scalar()
 
-    def test_save_upsert(self):
-        df = pd.DataFrame([{
-            'ID': 'x',
-            'full_address': '123 Main St',
-            'house_number': '123',
-            'road': 'Main St',
-            'city': 'Testville',
-            'state': 'TS',
-            'postcode': '12345',
-            'country': 'XY',
-            'filename': 'ex.xlsx',
-            'processed_timestamp': '20250101T120000'
-        }])
-
+    def test_save_empty_dataframe(self):
+        df = pd.DataFrame(columns=[
+            "ID", "full_address", "house_number", "road", "city", "state",
+            "postcode", "country", "filename", "processed_timestamp",
+            "extracted_by", "status"
+        ])
         self.repo.save(df)
+        self.assertEqual(self._count_rows(), 0)
 
-        delete_sql, delete_params = self.conn.last_execute
-        self.assertTrue(delete_sql.startswith('DELETE FROM iso_address'))
-        self.assertEqual(delete_params, ['x'])
+    def test_save_inserts_and_roundtrips(self):
+        data = [
+            {
+                "ID": "a1", "full_address": "1 A St", "house_number": "1",
+                "road": "A St", "city": "City", "state": "ST", "postcode": "12345",
+                "country": "USA", "filename": "f1.xlsx", "processed_timestamp": "t1",
+                "extracted_by": "tester", "status": "PERFECT"
+            },
+            {
+                "ID": "b2", "full_address": "2 B Rd", "house_number": "2",
+                "road": "B Rd", "city": "Town", "state": "TS", "postcode": "54321",
+                "country": "CAN", "filename": "f2.xlsx", "processed_timestamp": "t2",
+                "extracted_by": "tester", "status": "PARTIAL"
+            }
+        ]
+        df = pd.DataFrame(data)
+        self.repo.save(df, batch_size=1)
 
-        batch = self.conn.last_batch
-        self.assertEqual(len(batch), 1)
-        row = batch[0]
-        self.assertEqual(row[0], 'x')
-        self.assertEqual(row[-1], '20250101T120000')
+        with self.engine.begin() as conn:
+            rows = conn.execute(text(
+                f"SELECT id, full_address, status FROM {self.table_name}"
+            )).all()
+
+        self.assertEqual(len(rows), 2)
+        self.assertIn(("a1", "1 A St", "PERFECT"), rows)
+        self.assertIn(("b2", "2 B Rd", "PARTIAL"), rows)
+
+    def test_save_upserts_existing(self):
+        initial = pd.DataFrame([{
+            "ID": "x1", "full_address": "Old", "house_number": "0", "road": "OldRd",
+            "city": "OldCity", "state": "OS", "postcode": "00000", "country": "USA",
+            "filename": "old.xlsx", "processed_timestamp": "t0",
+            "extracted_by": "tester", "status": "PERFECT"
+        }])
+        self.repo.save(initial, batch_size=1)
+        self.assertEqual(self._count_rows(), 1)
+
+        updated = pd.DataFrame([{
+            "ID": "x1", "full_address": "New", "house_number": "9", "road": "NewRd",
+            "city": "NewCity", "state": "NS", "postcode": "99999", "country": "GB",
+            "filename": "new.xlsx", "processed_timestamp": "t1",
+            "extracted_by": "tester2", "status": "PARTIAL"
+        }])
+        self.repo.save(updated, batch_size=1)
+
+        self.assertEqual(self._count_rows(), 1)
+        with self.engine.begin() as conn:
+            row = conn.execute(text(
+                f"SELECT full_address, city, status, extracted_by "
+                f"FROM {self.table_name} WHERE id='x1'"
+            )).one()
+        self.assertEqual(row, ("New", "NewCity", "PARTIAL", "tester2"))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

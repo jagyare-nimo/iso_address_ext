@@ -1,11 +1,12 @@
-from sqlalchemy import MetaData, Table, Column, String
+from sqlalchemy import MetaData, Table, Column, Integer, String
 
 
 def create_iso_address_table(engine):
     metadata = MetaData()
     Table(
         'iso_address', metadata,
-        Column('id', String(36), primary_key=True),
+        Column('record_id', Integer, primary_key=True, autoincrement=True),
+        Column('id', String(36)),
         Column('full_address', String(500)),
         Column('house_number', String(10)),
         Column('road', String(128)),
