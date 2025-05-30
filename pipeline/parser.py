@@ -184,7 +184,7 @@ class AddressParserService:
 
             # uppercase everything now
             rec = {
-                'ID': id_val.upper(),
+                'ID': id_val,
                 'full_address': row['full_address'].upper(),
                 'house_number': house.upper(),
                 'road': road.upper(),

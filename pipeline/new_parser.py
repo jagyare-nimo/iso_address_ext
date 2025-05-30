@@ -37,13 +37,15 @@ _COUNTRY_MAP = {
 }
 
 _US_STATES = {s.lower() for s in [
-    "AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN","IA","KS",
-    "KY","LA","ME","MD","MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ","NM","NY",
-    "NC","ND","OH","OK","OR","PA","RI","SC","SD","TN","TX","UT","VT","VA","WA","WV","WI","WY"
+    "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA", "HI", "ID", "IL", "IN", "IA", "KS",
+    "KY", "LA", "ME", "MD", "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ", "NM", "NY",
+    "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY"
 ]}
+
 _CA_PROVINCES = {p.lower() for p in [
-    "AB","BC","MB","NB","NL","NS","NT","NU","ON","PE","QC","SK","YT"
+    "AB", "BC", "MB", "NB", "NL", "NS", "NT", "NU", "ON", "PE", "QC", "SK", "YT"
 ]}
+
 _UK_PC = re.compile(r'\b[A-Z]{1,2}\d{1,2}\s*\d[A-Z]{2}\b', re.I)
 
 
@@ -106,7 +108,7 @@ class AddressParserService:
         texts = df['full_address'].tolist()
         idxs = list(df.index)
         chunk = 5000
-        batches = [(texts[i:i+chunk], idxs[i:i+chunk])
+        batches = [(texts[i:i + chunk], idxs[i:i + chunk])
                    for i in range(0, len(texts), chunk)]
 
         all_dicts = {}
@@ -128,7 +130,7 @@ class AddressParserService:
 
             # determine status
             id_val = norm(row.get('ID'))
-            lines = [norm(row.get(c)) for c in ('ADDRESSLINE1','ADDRESSLINE2','ADDRESSLINE3')]
+            lines = [norm(row.get(c)) for c in ('ADDRESSLINE1', 'ADDRESSLINE2', 'ADDRESSLINE3')]
             if not id_val or all(not L.strip() for L in lines):
                 status = 'INVALID'
             elif all(L.strip() for L in lines):
@@ -138,10 +140,10 @@ class AddressParserService:
 
             # take parsed values (already cleaned of None/NaN)
             house = norm(d.get('house_number') or d.get('StreetNumber'))
-            road  = norm(d.get('road')         or d.get('StreetName'))
-            city  = norm(d.get('city')         or d.get('Municipality'))
-            state = norm(d.get('state')        or d.get('Province'))
-            pcode = norm(d.get('postcode')     or d.get('PostalCode'))
+            road = norm(d.get('road') or d.get('StreetName'))
+            city = norm(d.get('city') or d.get('Municipality'))
+            state = norm(d.get('state') or d.get('Province'))
+            pcode = norm(d.get('postcode') or d.get('PostalCode'))
 
             # map country
             raw_ctry = (d.get('country') or d.get('Country') or "").strip().lower()
@@ -165,7 +167,7 @@ class AddressParserService:
                 if lo in _US_STATES or lo in _CA_PROVINCES:
                     city_o = " ".join(tokens[:ti])
                     state_o = tok
-                    pcode_o = " ".join(tokens[ti+1:])
+                    pcode_o = " ".join(tokens[ti + 1:])
                     break
             if city_o:
                 city, state, pcode = city_o, state_o or state, pcode_o or pcode
@@ -173,27 +175,27 @@ class AddressParserService:
             # fallback from ADDRESSLINE3 only if needed
             raw3 = norm(row.get('ADDRESSLINE3')).strip()
             if (not state or not pcode) and raw3:
-                parts3 = raw3.split(None,1)
+                parts3 = raw3.split(None, 1)
                 if parts3:
                     if not state:
                         state = parts3[0]
-                    if not pcode and len(parts3)>1:
+                    if not pcode and len(parts3) > 1:
                         pcode = parts3[1]
 
             # uppercase everything now
             rec = {
-                'ID':                   id_val.upper(),
-                'full_address':        row['full_address'].upper(),
-                'house_number':        house.upper(),
-                'road':                road.upper(),
-                'city':                city.upper(),
-                'state':               state.upper(),
-                'postcode':            pcode.upper(),
-                'country':             country.upper(),
-                'filename':            filename_ts,
+                'ID': id_val.upper(),
+                'full_address': row['full_address'].upper(),
+                'house_number': house.upper(),
+                'road': road.upper(),
+                'city': city.upper(),
+                'state': state.upper(),
+                'postcode': pcode.upper(),
+                'country': country.upper(),
+                'filename': filename_ts,
                 'processed_timestamp': ts.upper(),
-                'extracted_by':        self.extracted_by,
-                'status':              status.upper(),
+                'extracted_by': self.extracted_by,
+                'status': status.upper(),
             }
             records.append(rec)
 

@@ -117,7 +117,7 @@ def main():
         description="Generate mixed-address Excel test data."
     )
     parser.add_argument(
-        "--count", "-c", type=int, default=100,
+        "--count", "-c", type=int, default=100000,
         help="Number of rows to generate"
     )
     parser.add_argument(

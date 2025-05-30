@@ -1,39 +1,46 @@
-import datetime
 import os
-import warnings
+import datetime
 from pathlib import Path
 
 import pandas as pd
 
-warnings.filterwarnings("ignore", category=UserWarning)
-
 
 class ExcelExtractor:
+    """
+    Reads large Excel sheets and slices them into 10 000‐row chunks,
+    writing each out as <stem>_<timestamp>_part<N>_extracted.xlsx.
+    """
+
     REQUIRED_COLUMNS = ['ID', 'ADDRESSLINE1', 'ADDRESSLINE2', 'ADDRESSLINE3']
 
     def __init__(self, input_dir: str, extracted_dir: str):
-        self.input_dir = input_dir
-        self.extracted_dir = extracted_dir
-        os.makedirs(self.extracted_dir, exist_ok=True)
+        self.input_dir = Path(input_dir)
+        self.extracted_dir = Path(extracted_dir)
+        self.extracted_dir.mkdir(parents=True, exist_ok=True)
 
     def list_files(self) -> list[str]:
         return [
-            f for f in os.listdir(self.input_dir)
-            if f.lower().endswith(('.xls', '.xlsx'))
+            f.name for f in self.input_dir.iterdir()
+            if f.suffix.lower() in ('.xls', '.xlsx')
         ]
 
-    def extract(self, filename: str) -> str:
-        # 1) read
-        in_path = os.path.join(self.input_dir, filename)
-        df = pd.read_excel(in_path, engine='openpyxl')[self.REQUIRED_COLUMNS]
+    def extract(self, filename: str) -> list[str]:
+        """
+        Returns a list of one or more chunk‐file paths under self.extracted_dir.
+        """
+        src = self.input_dir / filename
+        df = pd.read_excel(src, engine='openpyxl')[self.REQUIRED_COLUMNS]
 
-        # 2) compute one timestamp for this file
         ts = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+        stem, ext = src.stem, src.suffix
 
-        # 3) write out as <stem>_<ts>_extracted.xlsx
-        stem, ext = Path(filename).stem, Path(filename).suffix
-        out_name = f"{stem}_{ts}_extracted{ext}"
-        out_path = os.path.join(self.extracted_dir, out_name)
-        df.to_excel(out_path, index=False)
+        out_paths = []
+        # slice into 10k‐row pieces
+        for part_idx, start in enumerate(range(0, len(df), 10_000), start=1):
+            chunk = df.iloc[start:start + 10_000]
+            out_name = f"{stem}_{ts}_part{part_idx}_extracted{ext}"
+            out_path = self.extracted_dir / out_name
+            chunk.to_excel(out_path, index=False)
+            out_paths.append(str(out_path))
 
-        return out_path
+        return out_paths

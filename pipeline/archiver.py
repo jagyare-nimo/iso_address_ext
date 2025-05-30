@@ -1,6 +1,5 @@
 import os
 import shutil
-from pathlib import Path
 
 
 class Archiver:
@@ -11,16 +10,20 @@ class Archiver:
         os.makedirs(self.archive_input_dir, exist_ok=True)
         os.makedirs(self.archive_processed_dir, exist_ok=True)
 
-    def archive(self, original: str, processed_file: str):
-        # pull the same timestamp
-        safe_ts = Path(processed_file).stem.split("_")[-1]
+    def archive(self, original_raw_name: str, processed_file: str):
+        # 1) Move raw only if it's still there
+        raw_src = os.path.join(self.input_dir, original_raw_name)
+        raw_dst = os.path.join(self.archive_input_dir, original_raw_name)
+        try:
+            if os.path.exists(raw_src):
+                shutil.move(raw_src, raw_dst)
+        except Exception:
+            # swallow any error moving raw (e.g. already moved)
+            pass
 
-        # rename raw to <stem>_<ts><ext>
-        stem, ext = Path(original).stem, Path(original).suffix
-        new_raw = f"{stem}_{safe_ts}{ext}"
-
-        shutil.move(
-            os.path.join(self.input_dir, original),
-            os.path.join(self.archive_input_dir, new_raw)
-        )
-        shutil.move(processed_file, self.archive_processed_dir)
+        # 2) Move the processed chunk
+        try:
+            shutil.move(processed_file, self.archive_processed_dir)
+        except Exception as e:
+            # if something goes wrong here, let it bubble
+            raise

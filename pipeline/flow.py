@@ -1,5 +1,6 @@
 import warnings
 from pathlib import Path
+
 from prefect import flow, get_run_logger
 
 from pipeline.config import Config
@@ -13,41 +14,50 @@ warnings.filterwarnings("ignore", category=UserWarning)
 
 @flow(name="DeepParse Workflow")
 def deepparse_flow(config_path: str = None):
-    config_dir = Config(path=config_path) if config_path else Config()
-
-    for dirs in [
-        config_dir.input_dir,
-        config_dir.extracted_dir,
-        config_dir.processed_dir,
-        config_dir.archive_input_dir,
-        config_dir.archive_processed_dir
+    # 1) load config & ensure dirs
+    cfg = Config(path=config_path) if config_path else Config()
+    for d in [
+        cfg.input_dir,
+        cfg.extracted_dir,
+        cfg.processed_dir,
+        cfg.archive_input_dir,
+        cfg.archive_processed_dir
     ]:
-        Path(dirs).mkdir(parents=True, exist_ok=True)
+        Path(d).mkdir(parents=True, exist_ok=True)
 
-    extractor = ExcelExtractor(config_dir.input_dir, config_dir.extracted_dir)
+    # 2) init components
+    extractor = ExcelExtractor(cfg.input_dir, cfg.extracted_dir)
     parser_svc = AddressParserService()
-    repo = DatabaseRepository(config=config_dir)
-    archiver = Archiver(
-        input_dir=config_dir.input_dir,
-        archive_input_dir=config_dir.archive_input_dir,
-        archive_processed_dir=config_dir.archive_processed_dir
+    repo       = DatabaseRepository(config=cfg)
+    archiver   = Archiver(
+        input_dir=cfg.input_dir,
+        archive_input_dir=cfg.archive_input_dir,
+        archive_processed_dir=cfg.archive_processed_dir
     )
 
     logger = get_run_logger()
     files = extractor.list_files()
     if not files:
-        logger.warning(f"No Excel files found in {config_dir.input_dir}")
-    else:
-        logger.info(f"Processing {len(files)} files...")
+        logger.warning(f"No Excel files found in {cfg.input_dir}")
+        return
 
-    for filename in files:
-        extracted_path = extractor.extract(filename)
-        parsed_df, processed_path = parser_svc.parse_file(extracted_path, config_dir.processed_dir)
-        repo.save(parsed_df)
+    logger.info(f"Processing {len(files)} input files...")
 
-        archiver.archive(filename, processed_path)
+    # 3) for each raw file, extract → one or more 10k‐row chunks
+    for raw in files:
+        chunks = extractor.extract(raw)
+        logger.info(f"  Extracted {len(chunks)} chunk(s) from {raw}")
 
-        logger.info(f"Completed file: {filename}")
+        # 4) parse + save + archive each chunk independently
+        for chunk_path in chunks:
+            df, proc_path = parser_svc.parse_file(chunk_path, cfg.processed_dir)
+            repo.save(df)
+            # move original raw (only once per raw file) and each chunk’s processed
+            # we archive raw under its original name only once:
+            archiver.archive(Path(chunk_path).name, proc_path)
+            logger.info(f"    Completed chunk: {Path(chunk_path).name}")
+
+    logger.info("All done.")
 
 
 if __name__ == "__main__":
