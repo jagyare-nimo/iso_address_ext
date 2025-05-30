@@ -3,6 +3,7 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import queue
 import threading
+import time
 
 
 class UnixLFConverter:
@@ -14,7 +15,7 @@ class UnixLFConverter:
 
     def _process_chunk(self, chunk_id: int, lines: list[str]) -> tuple[int, bytes]:
         processed_content = "\n".join(
-            line.rstrip('\r\n') for line in lines) + "\n"  # Ensure single LF and trailing newline
+            line.rstrip('\r\n') for line in lines) + "\n"
         return chunk_id, processed_content.encode('utf-8')
 
     def convert_csv_to_text(self, input_csv_path: str, output_text_path: str) -> bool:
@@ -28,8 +29,7 @@ class UnixLFConverter:
             print(f"Error: Input path '{input_path}' is not a file.")
             return False
         if input_path.suffix.lower() not in ('.csv', '.txt'):
-            print(
-                f"Warning: Input file '{input_path}' does not have a typical .csv or .txt extension. Proceeding anyway.")
+            print(f"Warning: Input file '{input_path}' does not have a typical .csv or .txt extension. Proceeding anyway.")
 
         output_dir = output_path.parent
         if output_dir and not output_dir.exists():
@@ -40,36 +40,35 @@ class UnixLFConverter:
                 return False
 
         processed_chunks_queue = queue.Queue()
-        expected_chunk_id = 0
         conversion_successful = True
-
         stop_writer_event = threading.Event()
 
         def writer_thread_func():
-            nonlocal expected_chunk_id, conversion_successful
+            nonlocal conversion_successful
+            out_of_order_buffer = {}
+            current_expected_chunk_id = 0
             try:
                 with open(output_path, 'wb') as outfile:
                     while True:
                         try:
                             chunk_id, processed_bytes = processed_chunks_queue.get(timeout=1)
-
-                            if chunk_id == expected_chunk_id:
-                                outfile.write(processed_bytes)
-                                expected_chunk_id += 1
-                            else:
-                                processed_chunks_queue.put((chunk_id, processed_bytes))
-                                threading.sleep(0.01)
-
+                            out_of_order_buffer[chunk_id] = processed_bytes
                             processed_chunks_queue.task_done()
                         except queue.Empty:
-                            if stop_writer_event.is_set():
+                            if stop_writer_event.is_set() and not out_of_order_buffer:
                                 break
-                        except Exception as e:
-                            print(f"Error in writer thread: {e}")
-                            conversion_successful = False
+                            time.sleep(0.01)
+                            continue
+
+                        while current_expected_chunk_id in out_of_order_buffer:
+                            outfile.write(out_of_order_buffer.pop(current_expected_chunk_id))
+                            current_expected_chunk_id += 1
+
+                        if stop_writer_event.is_set() and processed_chunks_queue.empty() and not out_of_order_buffer:
                             break
-            except Exception as e:
-                print(f"Error opening output file for writing: {e}")
+
+            except Exception as exception_:
+                print(f"Error in writer thread: {exception_}")
                 conversion_successful = False
             finally:
                 while not processed_chunks_queue.empty():
@@ -103,25 +102,25 @@ class UnixLFConverter:
                     except Exception as exc:
                         print(f"Chunk processing generated an exception: {exc}")
                         conversion_successful = False
-                        break  # Stop if a chunk fails
+                        break
 
         except UnicodeDecodeError:
             print(f"Error: Could not decode '{input_path}'. It might not be UTF-8 encoded. "
                   "Please ensure the input file is UTF-8 or specify the correct encoding.")
             conversion_successful = False
-        except IOError as e:
-            print(f"Error during file reading: {e}")
+        except IOError as error_:
+            print(f"Error during file reading: {error_}")
             conversion_successful = False
-        except Exception as e:
-            print(f"An unexpected error occurred during conversion setup: {e}")
+        except Exception as error_:
+            print(f"An unexpected error occurred during conversion setup: {error_}")
             conversion_successful = False
         finally:
             processed_chunks_queue.join()
             stop_writer_event.set()
-            writer_thread.join(timeout=5)
+            writer_thread.join(timeout=10)
 
             if writer_thread.is_alive():
-                print("Warning: Writer thread did not terminate gracefully.")
+                print("Warning: Writer thread did not terminate gracefully. Output file might be incomplete.")
                 conversion_successful = False
 
         if conversion_successful:
