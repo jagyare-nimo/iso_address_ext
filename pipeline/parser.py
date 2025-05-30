@@ -1,11 +1,11 @@
 import os
 import re
 import datetime
-import ssl
 import warnings
 import pandas as pd
 import socket
 import getpass
+
 from pathlib import Path
 from prefect import get_run_logger
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -15,12 +15,7 @@ from requests.exceptions import SSLError as RequestsSSLError
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
-# allow corporate proxies
-try:
-    ssl._create_default_https_context = ssl._create_unverified_context
-except AttributeError:
-    pass
-
+# ISO-code mapping
 _COUNTRY_MAP = {
     'us': 'USA', 'usa': 'USA', 'united states': 'US', 'united states of america': 'US',
     'ca': 'CAN', 'canada': 'CA',
@@ -31,27 +26,33 @@ _COUNTRY_MAP = {
     'bm': 'BM', 'bermuda': 'BM',
     'gt': 'GT', 'guatemala': 'GT',
     'il': 'IL', 'israel': 'IL',
-    'ky': 'KY', 'cayman islands': 'KY',
+    'ky': 'KY', 'cayman islands': 'KY', 'kentucky': 'KY',
     'no': 'NO', 'norway': 'NO',
     'pa': 'PA', 'panama': 'PA',
 }
 
+# Fallback by US state / CA province
 _US_STATES = {s.lower() for s in [
     "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA", "HI", "ID", "IL", "IN", "IA", "KS",
     "KY", "LA", "ME", "MD", "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ", "NM", "NY",
     "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY"
 ]}
-
 _CA_PROVINCES = {p.lower() for p in [
     "AB", "BC", "MB", "NB", "NL", "NS", "NT", "NU", "ON", "PE", "QC", "SK", "YT"
 ]}
 
+# Heuristic to detect UK postcodes
 _UK_PC = re.compile(r'\b[A-Z]{1,2}\d{1,2}\s*\d[A-Z]{2}\b', re.I)
 
 
 class AddressParserService:
+    """
+    Parallel address parsing with ISO‐normalization, status ("PERFECT"/"PARTIAL"/"INVALID"),
+    and a short‐circuit to never feed blank addresses into DeepParse.
+    """
+
     def __init__(self, workers: int = None, extracted_by: str = None):
-        # who extracted
+        # who ran it?
         if extracted_by:
             self.extracted_by = extracted_by.upper()
         else:
@@ -60,150 +61,136 @@ class AddressParserService:
             except Exception:
                 self.extracted_by = getpass.getuser().upper()
 
-        # ensure cache for deepparse
+        # ensure model cache dir (fixes Windows corporate SSL issues)
         cache_dir = Path.home() / ".cache" / "deepparse"
         cache_dir.mkdir(parents=True, exist_ok=True)
+
+        # force an online download of bpemb.ckpt if needed
         try:
             AddressParser(offline=False)
         except (SSLError, RequestsSSLError, FileNotFoundError):
             pass
-        except Exception:
-            pass
 
+        # now safe to build offline parser
         self._parser = AddressParser(offline=True)
         self.workers = workers or os.cpu_count()
 
     @staticmethod
-    def _parse_batch(batch):
+    def _parse_batch(batch: tuple[list[str], list[int]]) -> list[tuple[int, dict]]:
+        """Helper for ThreadPoolExecutor: parse a batch of texts."""
         parser = AddressParser(offline=True)
         texts, idxs = batch
         parsed = parser(texts)
-        return [(i, pa.to_dict()) for i, pa in zip(idxs, parsed)]
+        return [(idx, pa.to_dict()) for idx, pa in zip(idxs, parsed)]
 
     def parse_file(self, extracted_path: str, processed_dir: str) -> tuple[pd.DataFrame, str]:
+        # load logger
         try:
             logger = get_run_logger()
         except Exception:
             import logging
             logger = logging.getLogger(__name__)
 
-        df = pd.read_excel(extracted_path, engine='openpyxl')
+        # 1) read & join lines into full_address
+        df = pd.read_excel(extracted_path, engine="openpyxl")
 
-        # helper to normalize None/NaN → ""
-        def norm(v):
-            return "" if v is None or (isinstance(v, float) and pd.isna(v)) else str(v)
-
-        # 1) build full_address without commas
         def join_lines(r):
             parts = [
-                norm(r.get('ADDRESSLINE1')),
-                norm(r.get('ADDRESSLINE2')),
-                norm(r.get('ADDRESSLINE3')),
+                str(r.get("ADDRESSLINE1", "")).strip(),
+                str(r.get("ADDRESSLINE2", "")).strip(),
+                str(r.get("ADDRESSLINE3", "")).strip(),
             ]
-            return " ".join(p.strip() for p in parts if p.strip())
+            return ", ".join(p for p in parts if p)
 
-        df['full_address'] = df.apply(join_lines, axis=1)
+        df["full_address"] = df.apply(join_lines, axis=1)
 
-        # 2) batch for parallel parse
-        texts = df['full_address'].tolist()
-        idxs = list(df.index)
+        # 2) split into “to-parse” vs “empty”
+        non_empty_mask = df["full_address"].str.strip().astype(bool)
+        non_empty_idxs = df.index[non_empty_mask].tolist()
+
+        # 3) batch & parse only non-empty
+        batches: list[tuple[list[str], list[int]]] = []
+        texts = df.loc[non_empty_idxs, "full_address"].tolist()
         chunk = 5000
-        batches = [(texts[i:i + chunk], idxs[i:i + chunk])
-                   for i in range(0, len(texts), chunk)]
+        for i in range(0, len(texts), chunk):
+            batches.append((texts[i: i + chunk], non_empty_idxs[i: i + chunk]))
 
-        all_dicts = {}
+        parsed_map: dict[int, dict] = {}
         with ThreadPoolExecutor(max_workers=self.workers) as pool:
             futures = [pool.submit(self._parse_batch, b) for b in batches]
             for fut in as_completed(futures):
                 for idx, pdict in fut.result():
-                    all_dicts[idx] = pdict
+                    parsed_map[idx] = pdict
 
-        # 3) assemble
+        # 4) assemble final records (including invalid/empty)
         records = []
-        ts = datetime.datetime.utcnow().isoformat() + 'Z'
-        stem, suffix = Path(extracted_path).stem, Path(extracted_path).suffix
-        safe_ts = ts.replace('-', '').replace(':', '')
+        ts = datetime.datetime.utcnow().isoformat() + "Z"
+        stem = Path(extracted_path).stem
+        suffix = Path(extracted_path).suffix
+        safe_ts = ts.replace("-", "").replace(":", "")
         filename_ts = f"{stem}_{safe_ts}".upper()
 
         for i, row in df.iterrows():
-            d = all_dicts.get(i, {})
-
-            # determine status
-            id_val = norm(row.get('ID'))
-            lines = [norm(row.get(c)) for c in ('ADDRESSLINE1', 'ADDRESSLINE2', 'ADDRESSLINE3')]
-            if not id_val or all(not L.strip() for L in lines):
-                status = 'INVALID'
-            elif all(L.strip() for L in lines):
-                status = 'PERFECT'
+            full_addr = row["full_address"]
+            # INVALID if blank
+            if not str(full_addr).strip():
+                status = "INVALID"
+                parsed = {}
             else:
-                status = 'PARTIAL'
+                # PERFECT vs PARTIAL
+                lines = [
+                    row.get("ADDRESSLINE1", ""),
+                    row.get("ADDRESSLINE2", ""),
+                    row.get("ADDRESSLINE3", ""),
+                ]
+                if all(str(x).strip() for x in lines):
+                    status = "PERFECT"
+                else:
+                    status = "PARTIAL"
+                parsed = parsed_map.get(i, {})
 
-            # take parsed values (already cleaned of None/NaN)
-            house = norm(d.get('house_number') or d.get('StreetNumber'))
-            road = norm(d.get('road') or d.get('StreetName'))
-            city = norm(d.get('city') or d.get('Municipality'))
-            state = norm(d.get('state') or d.get('Province'))
-            pcode = norm(d.get('postcode') or d.get('PostalCode'))
+            # pull fields from parsed (or "" if missing)
+            hn = (parsed.get("house_number") or parsed.get("StreetNumber") or "")
+            rd = (parsed.get("road") or parsed.get("StreetName") or "")
+            city = (parsed.get("city") or parsed.get("Municipality") or "")
+            st = (parsed.get("state") or parsed.get("Province") or "")
+            pcode = (parsed.get("postcode") or parsed.get("PostalCode") or "")
 
-            # map country
-            raw_ctry = (d.get('country') or d.get('Country') or "").strip().lower()
-            country = _COUNTRY_MAP.get(raw_ctry, "")
-            if not country and row.get('ADDRESSLINE3'):
-                country = _COUNTRY_MAP.get(norm(row['ADDRESSLINE3']).strip().lower(), "")
-            sg = state.strip().lower()
-            if not country and sg in _US_STATES:
-                country = 'US'
-            if not country and sg in _CA_PROVINCES:
-                country = 'CA'
-            if not country and _UK_PC.search(row['full_address']):
-                country = 'GB'
+            # normalize country
+            c_raw = (parsed.get("country") or parsed.get("Country") or "").strip().lower()
+            ctry = _COUNTRY_MAP.get(c_raw, "")
+            if not ctry and row.get("ADDRESSLINE3"):
+                ctry = _COUNTRY_MAP.get(str(row["ADDRESSLINE3"]).strip().lower(), "")
+            sg = st.strip().lower()
+            if not ctry and sg in _US_STATES:
+                ctry = "US"
+            if not ctry and sg in _CA_PROVINCES:
+                ctry = "CA"
+            if not ctry and _UK_PC.search(full_addr):
+                ctry = "GB"
 
-            # smart override from ADDRESSLINE2 tokens
-            raw2 = norm(row.get('ADDRESSLINE2')).strip()
-            tokens = raw2.split()
-            city_o = state_o = pcode_o = None
-            for ti, tok in enumerate(tokens):
-                lo = tok.lower()
-                if lo in _US_STATES or lo in _CA_PROVINCES:
-                    city_o = " ".join(tokens[:ti])
-                    state_o = tok
-                    pcode_o = " ".join(tokens[ti + 1:])
-                    break
-            if city_o:
-                city, state, pcode = city_o, state_o or state, pcode_o or pcode
-
-            # fallback from ADDRESSLINE3 only if needed
-            raw3 = norm(row.get('ADDRESSLINE3')).strip()
-            if (not state or not pcode) and raw3:
-                parts3 = raw3.split(None, 1)
-                if parts3:
-                    if not state:
-                        state = parts3[0]
-                    if not pcode and len(parts3) > 1:
-                        pcode = parts3[1]
-
-            # uppercase everything now
-            rec = {
-                'ID': id_val,
-                'full_address': row['full_address'].upper(),
-                'house_number': house.upper(),
-                'road': road.upper(),
-                'city': city.upper(),
-                'state': state.upper(),
-                'postcode': pcode.upper(),
-                'country': country.upper(),
-                'filename': filename_ts,
-                'processed_timestamp': ts.upper(),
-                'extracted_by': self.extracted_by,
-                'status': status.upper(),
-            }
-            records.append(rec)
+            # build final uppercase record
+            records.append({
+                "ID": str(row.get("ID", "")).upper(),
+                "full_address": full_addr.upper(),
+                "house_number": hn.upper(),
+                "road": rd.upper(),
+                "city": city.upper(),
+                "state": st.upper(),
+                "postcode": pcode.upper(),
+                "country": ctry.upper(),
+                "filename": filename_ts,
+                "processed_timestamp": ts.upper(),
+                "extracted_by": self.extracted_by,
+                "status": status,
+            })
 
         out_df = pd.DataFrame(records)
 
-        # 4) write processed Excel
+        # 5) write Excel & return
         Path(processed_dir).mkdir(parents=True, exist_ok=True)
-        processed_file = str(Path(processed_dir) / f"{stem}_{safe_ts}{suffix}")
+        out_name = f"{stem}_{safe_ts}{suffix}"
+        processed_file = str(Path(processed_dir) / out_name)
         out_df.to_excel(processed_file, index=False)
 
         logger.info(f"Parsed {len(records)} addresses → {processed_file}")
