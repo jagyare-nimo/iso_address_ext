@@ -77,13 +77,16 @@ class AddressParserService:
             import logging
             logger = logging.getLogger(__name__)
 
+        # 1) load & normalize headers
         df = pd.read_excel(extracted_path, engine="openpyxl")
+        df.columns = df.columns.str.upper()
 
         def clean(val):
             if pd.isna(val) or val is None:
                 return ""
             return str(val).strip()
 
+        # 2) build full_address
         def join_lines(row):
             parts = [
                 clean(row.get("ADDRESSLINE1")),
@@ -94,17 +97,16 @@ class AddressParserService:
 
         df["full_address"] = df.apply(join_lines, axis=1)
 
-        # only keep non-empty addresses
-        non_empty = df["full_address"].str.strip().astype(bool)
-        df = df[non_empty]
+        # 3) pick only non‐empty addresses
+        mask = df["full_address"].str.strip().astype(bool)
+        idxs = df.index[mask].tolist()
+        texts = df.loc[idxs, "full_address"].tolist()
 
-        # batch and parse
-        idxs = df.index.tolist()
-        texts = df["full_address"].tolist()
+        # 4) batch & parse
         batches = []
         chunk = 5000
         for i in range(0, len(texts), chunk):
-            batches.append((texts[i:i + chunk], idxs[i:i + chunk]))
+            batches.append((texts[i: i + chunk], idxs[i: i + chunk]))
 
         parsed_map = {}
         with ThreadPoolExecutor(max_workers=self.workers) as pool:
@@ -113,6 +115,7 @@ class AddressParserService:
                 for idx, pdict in fut.result():
                     parsed_map[idx] = pdict
 
+        # 5) assemble only those with a non‐empty full_address
         records = []
         ts = datetime.datetime.utcnow().isoformat() + "Z"
         stem = Path(extracted_path).stem
@@ -120,51 +123,64 @@ class AddressParserService:
         safe_ts = ts.replace("-", "").replace(":", "")
         filename_ts = f"{stem}_{safe_ts}".upper()
 
-        for i, row in df.iterrows():
-            parsed = parsed_map.get(i, {})
-            status = "PERFECT" if all(
-                clean(row[c]) for c in ["ADDRESSLINE1", "ADDRESSLINE2", "ADDRESSLINE3"]
-            ) else "PARTIAL"
+        for i in idxs:
+            row = df.loc[i]
+            full_addr = row["full_address"]
+            # determine PERFECT / PARTIAL / INVALID
+            parts = [
+                clean(row.get("ADDRESSLINE1")),
+                clean(row.get("ADDRESSLINE2")),
+                clean(row.get("ADDRESSLINE3")),
+            ]
+            status = (
+                "PERFECT" if all(parts)
+                else "PARTIAL"
+            )
 
-            # parsed fields
-            house = clean(parsed.get("house_number") or parsed.get("StreetNumber"))
+            parsed = parsed_map.get(i, {})
+
+            # pull parsed fields
+            house_number = clean(parsed.get("house_number") or parsed.get("StreetNumber"))
             road = clean(parsed.get("road") or parsed.get("StreetName"))
             city = clean(parsed.get("city") or parsed.get("Municipality"))
             state = clean(parsed.get("state") or parsed.get("Province"))
-            pcode = clean(parsed.get("postcode") or parsed.get("PostalCode"))
+            p_code = clean(parsed.get("postcode") or parsed.get("PostalCode"))
 
-            # country logic
-            c_raw = (parsed.get("country") or parsed.get("Country") or "").lower().strip()
+            # normalize country
+            c_raw = (parsed.get("country") or parsed.get("Country") or "").lower()
             country = _COUNTRY_MAP.get(c_raw, "")
-            if not country and row.get("ADDRESSLINE3"):
-                country = _COUNTRY_MAP.get(clean(row["ADDRESSLINE3"]).lower(), "")
+            if not country and clean(row.get("ADDRESSLINE3")).lower() in _COUNTRY_MAP:
+                country = _COUNTRY_MAP[clean(row["ADDRESSLINE3"]).lower()]
             sg = state.lower()
             if not country and sg in _US_STATES:
-                country = 'US'
+                country = "US"
             if not country and sg in _CA_PROVINCES:
-                country = 'CA'
-            if not country and _UK_PC.search(row['full_address']):
-                country = 'GB'
+                country = "CA"
+            if not country and _UK_PC.search(full_addr):
+                country = "GB"
 
-            rec = {
+            records.append({
                 "ID": clean(row.get("ID")),
-                "full_address": row["full_address"].upper(),
-                "house_number": house.upper(),
+                "full_address": full_addr.upper(),
+                "house_number": house_number.upper(),
                 "road": road.upper(),
                 "city": city.upper(),
                 "state": state.upper(),
-                "postcode": pcode.upper(),
+                "postcode": p_code.upper(),
                 "country": country.upper(),
                 "filename": filename_ts,
                 "processed_timestamp": ts.upper(),
                 "extracted_by": self.extracted_by,
                 "status": status,
-            }
-            records.append(rec)
+            })
 
         out_df = pd.DataFrame(records)
+
+        # 6) persist
         Path(processed_dir).mkdir(parents=True, exist_ok=True)
-        processed_file = str(Path(processed_dir) / f"{stem}_{safe_ts}{suffix}")
+        out_name = f"{stem}_{safe_ts}{suffix}"
+        processed_file = str(Path(processed_dir) / out_name)
         out_df.to_excel(processed_file, index=False)
+
         logger.info(f"Parsed {len(records)} addresses → {processed_file}")
         return out_df, processed_file
