@@ -1,0 +1,4 @@
+uni_fen_dir:
+  raw: 'resources/raw'
+  processed: 'resources/processed'
+  archive: 'resources/archived'

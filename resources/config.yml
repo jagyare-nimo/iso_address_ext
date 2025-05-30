@@ -8,6 +8,11 @@ archive:
   input_dir: 'resources/ici_sheets/archive/raw'
   processed_dir: 'resources/ici_sheets/archive/processed'
 
+
+uni_fen_dir:
+  raw: 'resources/fenergo/raw'
+  processed: 'resources/fenergo/processed'
+
 #datasource:
 #  url: 'jdbc:h2:file:resources/data/ici_extract;MODE=PostgreSQL;DB_CLOSE_ON_EXIT=FALSE'
 #  driverClassName: 'org.h2.Driver'
