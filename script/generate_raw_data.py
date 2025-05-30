@@ -102,7 +102,7 @@ def generate_mixed_addresses(n: int, output_file: Path):
 
 def main():
     p = argparse.ArgumentParser(description="Generate mixed-address test data.")
-    p.add_argument("--count", "-c", type=int, default=100000,
+    p.add_argument("--count", "-c", type=int, default=1000,
                    help="Number of rows to generate")
     p.add_argument("--out", "-o", type=str,
                    default="../resources/ici_sheets/raw/raw_input.xlsx",
