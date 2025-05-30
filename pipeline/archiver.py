@@ -27,7 +27,6 @@ class Archiver:
                 logger.warning(f"Raw file not found for archiving: {raw_src}")
         except Exception as e:
             logger.error(f"Error archiving raw file {raw_src}: {e}")
-            # Do not re-raise, as the flow might continue even if raw archiving fails
             pass
 
     def archive_processed(self, processed_file_path: str):
@@ -39,7 +38,16 @@ class Archiver:
         try:
             shutil.move(processed_file_path, processed_dst)
             logger.info(f"Archived processed chunk: {processed_file_path} -> {processed_dst}")
-        except Exception as e:
-            # If something goes wrong here, it's a critical archiving failure for the chunk
-            logger.error(f"Error archiving processed file {processed_file_path}: {e}")
-            raise  # Re-raise this exception as it indicates a problem with the processed file
+        except shutil.Error as e:  # Catch shutil.Error specifically
+            if "already exists" in str(e):
+                logger.warning(f"Processed file already exists in archive, skipping move: {processed_dst}")
+                # Optionally, you could delete the source file here if you're certain it's a duplicate
+                # and you want to remove it from the extracted directory.
+                # os.remove(processed_file_path)
+            else:
+                logger.error(f"Error archiving processed file {processed_file_path}: {e}")
+                raise  # Re-raise other shutil errors
+
+        except Exception as e:  # Catch any other general exceptions
+            logger.error(f"Unexpected error archiving processed file {processed_file_path}: {e}")
+            raise  # Re-raise unexpected errors

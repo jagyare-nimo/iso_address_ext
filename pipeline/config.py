@@ -17,14 +17,22 @@ class Config:
 
         def _resolve(key):
             val = config_file.get(key, '')
+            # If val is an empty string, return empty string, otherwise resolve the path
             return str((project_root / val).resolve()) if val else ''
 
         self.input_dir = _resolve('input_dir')
         self.extracted_dir = _resolve('extracted_dir')
         self.processed_dir = _resolve('processed_dir')
+
         archive = config_file.get('archive', {}) or {}
-        self.archive_input_dir = str((project_root / archive.get('input_dir', '')).resolve())
-        self.archive_processed_dir = str((project_root / archive.get('processed_dir', '')).resolve())
+
+        # FIX: Apply the same conditional resolution logic to archive paths
+        archive_input_val = archive.get('input_dir', '')
+        self.archive_input_dir = str((project_root / archive_input_val).resolve()) if archive_input_val else ''
+
+        archive_processed_val = archive.get('processed_dir', '')
+        self.archive_processed_dir = str(
+            (project_root / archive_processed_val).resolve()) if archive_processed_val else ''
 
         datasource = config_file.get('datasource', {}) or {}
         self.datasource_url = datasource.get('url', '')
