@@ -1,5 +1,8 @@
 import os
 import shutil
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class Archiver:
@@ -10,20 +13,33 @@ class Archiver:
         os.makedirs(self.archive_input_dir, exist_ok=True)
         os.makedirs(self.archive_processed_dir, exist_ok=True)
 
-    def archive(self, original_raw_name: str, processed_file: str):
-        # 1) Move raw only if it's still there
-        raw_src = os.path.join(self.input_dir, original_raw_name)
-        raw_dst = os.path.join(self.archive_input_dir, original_raw_name)
+    def archive_raw(self, raw_filename: str):
+        """
+        Archives the original raw input file.
+        """
+        raw_src = os.path.join(self.input_dir, raw_filename)
+        raw_dst = os.path.join(self.archive_input_dir, raw_filename)
         try:
             if os.path.exists(raw_src):
                 shutil.move(raw_src, raw_dst)
-        except Exception:
-            # swallow any error moving raw (e.g. already moved)
+                logger.info(f"Archived raw file: {raw_src} -> {raw_dst}")
+            else:
+                logger.warning(f"Raw file not found for archiving: {raw_src}")
+        except Exception as e:
+            logger.error(f"Error archiving raw file {raw_src}: {e}")
+            # Do not re-raise, as the flow might continue even if raw archiving fails
             pass
 
-        # 2) Move the processed chunk
+    def archive_processed(self, processed_file_path: str):
+        """
+        Archives a processed chunk file.
+        """
+        processed_file_name = os.path.basename(processed_file_path)
+        processed_dst = os.path.join(self.archive_processed_dir, processed_file_name)
         try:
-            shutil.move(processed_file, self.archive_processed_dir)
+            shutil.move(processed_file_path, processed_dst)
+            logger.info(f"Archived processed chunk: {processed_file_path} -> {processed_dst}")
         except Exception as e:
-            # if something goes wrong here, let it bubble
-            raise
+            # If something goes wrong here, it's a critical archiving failure for the chunk
+            logger.error(f"Error archiving processed file {processed_file_path}: {e}")
+            raise  # Re-raise this exception as it indicates a problem with the processed file
