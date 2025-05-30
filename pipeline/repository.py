@@ -11,7 +11,12 @@ class DatabaseRepository:
         create_iso_address_table(self.engine)
 
     def save(self, data_frame: pd.DataFrame, batch_size: int = 1000):
-        df = data_frame.rename(columns={"ID": "id"})
+        df = data_frame.copy()
+        df.columns = [c.lower() for c in df.columns]
+
+        if 'id' not in df.columns:
+            raise KeyError("DatabaseRepository.save(): no 'ID' column found in incoming DataFrame")
+
         ids = [str(i) for i in df['id'].dropna().unique()]
         if ids:
             delete_stmt = (
