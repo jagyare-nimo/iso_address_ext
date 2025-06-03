@@ -1,4 +1,4 @@
-// GlueStack.ts - Hybrid Approach with only Glue Job (no Lambda trigger logic here)
+// GlueStack.ts - Hybrid Approach with CDK-Defined Glue Job Only
 import * as cdk from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import * as glue from 'aws-cdk-lib/aws-glue';
@@ -8,14 +8,12 @@ export class GlueStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
-    // IAM Role for Glue Job
     const jobRole = iam.Role.fromRoleArn(
       this,
       'FenergoGlueJobRole',
       'arn:aws:iam::30574743344:role/81774/CRCDKSecurityResources/crd-rawzone-glue-role'
     );
 
-    // Glue Job created via Glue Studio (script exported to S3 and managed via CDK)
     new glue.CfnJob(this, 'FenergoEntityRawzoneGlueJob', {
       jobname: 'fenergo-entity-rawzone-ddg-transform-job',
       jobrole: jobRole.roleArn,

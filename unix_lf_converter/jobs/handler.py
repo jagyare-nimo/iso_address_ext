@@ -1,7 +1,6 @@
 import boto3
 import os
 
-
 def main(event, context):
     glue = boto3.client('glue')
     job_name = os.environ['GLUE_JOB_NAME']
@@ -17,11 +16,9 @@ def main(event, context):
                 JobName=job_name,
                 Arguments={
                     '--DDG_ENDPOINT': ddg_endpoint,
-                    '--BATCH_SIZE': batch_size
-                },
-                Environment={
-                    'SOURCE_BUCKET': bucket,
-                    'SOURCE_FILE_KEY': key
+                    '--BATCH_SIZE': batch_size,
+                    '--SOURCE_BUCKET': bucket,
+                    '--SOURCE_FILE_KEY': key
                 }
             )
             print(f"Started Glue job {response['JobRunId']} for file: {key}")
