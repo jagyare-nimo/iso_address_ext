@@ -1,5 +1,6 @@
 import boto3
 import os
+import os.path
 
 def main(event, context):
     glue = boto3.client('glue')
@@ -11,14 +12,16 @@ def main(event, context):
         bucket = record['s3']['bucket']['name']
         key = record['s3']['object']['key']
 
-        if key.endswith('.csv'):
-            response = glue.start_job_run(
-                JobName=job_name,
-                Arguments={
-                    '--DDG_ENDPOINT': ddg_endpoint,
-                    '--BATCH_SIZE': batch_size,
-                    '--SOURCE_BUCKET': bucket,
-                    '--SOURCE_FILE_KEY': key
-                }
-            )
-            print(f"Started Glue job {response['JobRunId']} for file: {key}")
+        # Extract folder prefix to process all CSVs under that folder
+        folder_prefix = os.path.dirname(key)  # e.g., 'entity/FENERGO/date=2025-06-02'
+
+        response = glue.start_job_run(
+            JobName=job_name,
+            Arguments={
+                '--DDG_ENDPOINT': ddg_endpoint,
+                '--BATCH_SIZE': batch_size,
+                '--SOURCE_BUCKET': bucket,
+                '--SOURCE_FOLDER_PREFIX': folder_prefix
+            }
+        )
+        print(f"Started Glue job {response['JobRunId']} for folder: {folder_prefix}")

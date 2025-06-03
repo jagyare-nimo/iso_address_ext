@@ -2,29 +2,42 @@ import sys
 import boto3
 import pandas as pd
 import requests
-import json
+import os
 from awsglue.utils import getResolvedOptions
 
-# Get arguments from Glue job config
+# Parse arguments passed from Glue job
 args = getResolvedOptions(sys.argv, [
     'JOB_NAME',
     'DDG_ENDPOINT',
     'BATCH_SIZE',
-    'S3_OUTPUT_PATH',
-    'S3_TRANSFORMATIONS_PATH',
     'SOURCE_BUCKET',
-    'SOURCE_FILE_KEY'
+    'SOURCE_FOLDER_PREFIX'
 ])
 
 SOURCE_BUCKET = args['SOURCE_BUCKET']
-SOURCE_FILE_KEY = args['SOURCE_FILE_KEY']
+FOLDER_PREFIX = args['SOURCE_FOLDER_PREFIX']
 DDG_ENDPOINT = args['DDG_ENDPOINT']
 BATCH_SIZE = int(args['BATCH_SIZE'])
 
-def fetch_csv_from_s3(bucket, key):
+def fetch_all_csvs(bucket, prefix):
     s3 = boto3.client('s3')
-    response = s3.get_object(Bucket=bucket, Key=key)
-    return pd.read_csv(response['Body'])
+    paginator = s3.get_paginator('list_objects_v2')
+    pages = paginator.paginate(Bucket=bucket, Prefix=prefix + '/')
+
+    dfs = []
+    for page in pages:
+        for obj in page.get('Contents', []):
+            key = obj['Key']
+            if key.endswith('.csv'):
+                print(f"Reading file: s3://{bucket}/{key}")
+                response = s3.get_object(Bucket=bucket, Key=key)
+                df = pd.read_csv(response['Body'])
+                dfs.append(df)
+
+    if not dfs:
+        raise ValueError(f"No CSV files found in s3://{bucket}/{prefix}/")
+
+    return pd.concat(dfs, ignore_index=True)
 
 def transform_row(row):
     return {
@@ -60,10 +73,10 @@ def post_batches_to_ddg(df, endpoint, batch_size):
         print(f"Sent final batch of {len(batch)}")
 
 def main():
-    print(f"Processing: s3://{SOURCE_BUCKET}/{SOURCE_FILE_KEY}")
-    df = fetch_csv_from_s3(SOURCE_BUCKET, SOURCE_FILE_KEY)
+    print(f"Processing all CSVs under: s3://{SOURCE_BUCKET}/{FOLDER_PREFIX}/")
+    df = fetch_all_csvs(SOURCE_BUCKET, FOLDER_PREFIX)
     post_batches_to_ddg(df, DDG_ENDPOINT, BATCH_SIZE)
-    print("Job finished.")
+    print("Glue job completed.")
 
 if __name__ == "__main__":
     main()
