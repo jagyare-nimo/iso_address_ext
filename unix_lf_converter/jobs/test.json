@@ -1,0 +1,14 @@
+{
+  "Records": [
+    {
+      "s3": {
+        "bucket": {
+          "name": "crd-l0-rawzone-batch"
+        },
+        "object": {
+          "key": "entity/FENERGO/date=2025-06-02/test.csv"
+        }
+      }
+    }
+  ]
+}
