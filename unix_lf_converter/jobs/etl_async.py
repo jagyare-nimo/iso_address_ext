@@ -204,7 +204,7 @@ def main():
         if all_batches_successful:
             archive_files(SOURCE_BUCKET, csv_keys, FOLDER_PREFIX)
         else:
-            json_log({"warning": "SkippingArchival", "reason": "Some batches failed", "jobId": job_id})
+            json_log({"warning": "Skipping Archival", "reason": "Some batches failed", "jobId": job_id})
 
         json_log({"status": "JobCompleted", "jobId": job_id, "rowCount": len(df)})
     except Exception as e:

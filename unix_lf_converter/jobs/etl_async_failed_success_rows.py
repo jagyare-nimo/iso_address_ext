@@ -54,6 +54,7 @@ REQUIRED_COLUMNS = [
     "Publish_Type"
 ]
 
+# --- S3 init -----
 s3 = boto3.client('s3')
 
 
@@ -111,9 +112,9 @@ def transform_row(row: pd.Series) -> dict:
 
 
 # --- Async HTTP with retry + backoff ---
-# --- Async HTTP with retry + backoff ---
 async def send_batch_async(session, batch: list, endpoint: str, max_retries: int = 2) -> tuple[bool, str]:
     payload = {"entities_list": batch}
+    json_log({"info": "PostingBatchPayload", "batchPayload": payload, "endpoint": endpoint})
     attempt = 0
     delay = 2  # initial backoff
 
@@ -151,7 +152,7 @@ async def send_batch_async(session, batch: list, endpoint: str, max_retries: int
 
 
 # --- Write Failed Rows to S3 ---
-def upload_failed_rows_to_s3(failed_rows: list, bucket: str, prefix: str):
+def upload_failed_rows_to_s3(failed_rows: list, bucket: str, prefix: str, source_key: str):
     if not failed_rows:
         return
 
@@ -159,14 +160,24 @@ def upload_failed_rows_to_s3(failed_rows: list, bucket: str, prefix: str):
     csv_buffer = StringIO()
     df.to_csv(csv_buffer, index=False)
 
-    failed_key = f"{prefix}/failed/failed_rows_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}.csv"
+    original_filename = source_key.split("/")[-1].replace(".csv", "")
+    timestamp = datetime.utcnow().strftime('%Y%m%d%H%M%S')
+    failed_key = f"{prefix}/failed/{original_filename}_failed_rows_{timestamp}.csv"
+
     s3.put_object(Bucket=bucket, Key=failed_key, Body=csv_buffer.getvalue())
 
-    json_log({"info": "FailedRowsUploaded", "rowCount": len(failed_rows), "s3Key": failed_key})
+    json_log({
+        "uploadFailedRows": {
+            "info": "Failed rows uploaded",
+            "rowCount": len(failed_rows),
+            "s3Key": failed_key,
+            "originalFile": source_key
+        }
+    }, level="WARNING")
 
 
 # --- Success/Failure Tracking at Row Level to handle Clearer FailureReason ---
-async def post_batches_with_success_tracking(df: pd.DataFrame, endpoint: str, batch_size: int) -> bool:
+async def post_batches_with_success_tracking(df: pd.DataFrame, endpoint: str, batch_size: int) -> tuple[list, list]:
     batch_rows = []
     batch_payload = []
     failed_rows = []
@@ -179,9 +190,9 @@ async def post_batches_with_success_tracking(df: pd.DataFrame, endpoint: str, ba
                 batch_payload.append(transformed)
                 row["RequestId"] = transformed["RequestId"]
                 batch_rows.append(row)
-            except Exception as e:
-                row[
-                    "FailureReason"] = f"HTTP {getattr(e, 'status', 'Unknown')} - {str(getattr(e, 'reason', str(e))).splitlines()[0].strip()}"
+            except Exception as err_:
+                fail_resp = f"HTTP {getattr(err_, 'status', 'Unknown')} - {str(getattr(err_, 'reason', '')).splitlines()[0].strip()}"
+                row["FailureReason"] = fail_resp
                 failed_rows.append(row)
                 continue
 
@@ -207,10 +218,16 @@ async def post_batches_with_success_tracking(df: pd.DataFrame, endpoint: str, ba
 
     upload_failed_rows_to_s3(failed_rows, SOURCE_BUCKET, FOLDER_PREFIX)
 
-    json_log({"summary": "BatchPostSummary", "totalRows": len(df), "successfulRows": len(successful_rows),
-              "failedRows": len(failed_rows)})
+    json_log({
+        "BatchPostSummary": {
+            "summary": "BatchPostSummary",
+            "totalRows": len(df),
+            "successfulRows": len(successful_rows),
+            "failedRows": len(failed_rows)
+        }
+    })
 
-    return len(failed_rows) == 0
+    return successful_rows, failed_rows
 
 
 # --- Archive CSVs ---
@@ -219,17 +236,26 @@ def archive_files(bucket: str, keys: list, prefix: str):
     failed = []
 
     for key in keys:
+        filename = key.split("/")[-1]
+        archive_key = f"{prefix}/archive/{filename}"
+
         try:
-            filename = key.split("/")[-1]
-            archive_key = f"{prefix}/archive/{filename}"
             s3.copy_object(Bucket=bucket, CopySource={'Bucket': bucket, 'Key': key}, Key=archive_key)
             s3.delete_object(Bucket=bucket, Key=key)
+
             archived.append(archive_key)
         except Exception as e:
             json_log({"error": "ArchiveFailed", "file": key, "reason": str(e)}, level="ERROR")
             failed.append(key)
 
-    json_log({"archivedCount": len(archived), "failedArchives": failed})
+    json_log({
+        "archiveSummary": {
+            "attempted": len(keys),
+            "successfulCount": len(archived),
+            "failedCount": len(failed),
+            "failedFiles": failed
+        }
+    })
 
 
 def main():
@@ -238,16 +264,24 @@ def main():
 
     try:
         df, csv_keys = fetch_all_csvs(SOURCE_BUCKET, FOLDER_PREFIX)
-        all_batches_successful = asyncio.run(post_batches_with_success_tracking(df, DDG_ENDPOINT, BATCH_SIZE))
+        successful_rows, failed_rows = asyncio.run(post_batches_with_success_tracking(df, DDG_ENDPOINT, BATCH_SIZE))
 
-        if all_batches_successful:
-            archive_files(SOURCE_BUCKET, csv_keys, FOLDER_PREFIX)
-        else:
-            json_log({"warning": "SkippingArchival", "reason": "Some batches failed", "jobId": job_id})
+        archive_files(SOURCE_BUCKET, csv_keys, FOLDER_PREFIX)
 
-        json_log({"status": "JobCompleted", "jobId": job_id, "rowCount": len(df)})
-    except Exception as e:
-        json_log({"status": "JobFailed", "jobId": job_id, "reason": str(e)}, level="CRITICAL")
+        json_log({
+            "jobDetails": {
+                "status": "JobCompleted",
+                "jobId": job_id,
+                "rowCount": len(df),
+                "successfulRows": len(successful_rows),
+                "failedRows": len(failed_rows),
+                "bucket": SOURCE_BUCKET,
+                "prefix": FOLDER_PREFIX,
+                "processedFiles": csv_keys
+            }
+        })
+    except Exception as exception:
+        json_log({"status": "JobFailed", "jobId": job_id, "reason": str(exception)}, level="CRITICAL")
         raise
 
 
