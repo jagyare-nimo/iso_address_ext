@@ -1,11 +1,12 @@
 import json
 import sys
 import uuid
+import asyncio
 from datetime import datetime
 
 import boto3
 import pandas as pd
-import requests
+import aiohttp
 from awsglue.utils import getResolvedOptions
 
 
@@ -41,14 +42,9 @@ except Exception as e:
 
 # --------------------- Constants ---------------------
 REQUIRED_COLUMNS = [
-    "UEN",
-    "Active_Flag",
-    "AML_Enterprise_Risk_Rating",
-    "AML_Last_Review_Date",
-    "AML_Due_Date",
-    "AML_System_Name",
-    "AML_System_ID",
-    "Publish_Type"
+    "UEN", "Active_Flag", "AML_Enterprise_Risk_Rating",
+    "AML_Last_Review_Date", "AML_Due_Date",
+    "AML_System_Name", "AML_System_ID", "Publish_Type"
 ]
 
 # --------------------- S3 & Batching ---------------------
@@ -118,54 +114,60 @@ def transform_row(row: pd.Series) -> dict:
     }
 
 
-def send_batch(batch: list, endpoint: str, max_retries: int = 2) -> bool:
+# --------------------- Asynchronous Batch Posting ---------------------
+async def send_batch_async(session, batch: list, endpoint: str, max_retries: int = 2) -> bool:
     payload = {"entities_list": batch}
-    json_log({"info": "PostingBatchPayload", "batch": payload, "endpoint": endpoint})
+    json_log({"info": "PostingBatchPayload", "batchPayload": payload, "endpoint": endpoint})
     attempt = 0
+    delay = 2  # initial delay in seconds
 
     while attempt <= max_retries:
         try:
-            resp = requests.post(endpoint, json=payload, timeout=30)
-            resp.raise_for_status()
-            json_log({"status": "BatchPosted", "batchSize": len(batch), "statusCode": resp.status_code,
-                      "attempt": attempt + 1})
-            return True
-        except Exception as exception:
+            async with session.post(endpoint, json=payload, timeout=30) as resp:
+                if 200 <= resp.status < 300:
+                    json_log({"status": "BatchPosted", "batchSize": len(batch), "statusCode": resp.status,
+                              "attempt": attempt + 1})
+                    return True
+                else:
+                    raise Exception(f"HTTP {resp.status}")
+        except Exception as e:
             attempt += 1
-            json_log({"error": "PostFailed", "attempt": attempt, "failedPayload": payload, "reason": str(exception)},
-                     level="ERROR")
-
+            json_log({"error": "PostFailed", "attempt": attempt, "batchSize": len(batch), "reason": str(e),
+                      "failedBatchPayload": payload}, level="ERROR")
             if attempt > max_retries:
                 json_log({"critical": "MaxRetriesExceeded", "batchSize": len(batch), "payload": payload},
                          level="CRITICAL")
                 return False
+            await asyncio.sleep(delay)
+            delay *= 2  # exponential backoff
 
 
-def post_batches_to_ddg(df: pd.DataFrame, endpoint: str, batch_size: int) -> bool:
+async def post_batches_to_ddg_async(df: pd.DataFrame, endpoint: str, batch_size: int) -> bool:
     batch = []
     all_success = True
 
-    for i, (_, row) in enumerate(df.iterrows(), start=1):
-        try:
-            batch.append(transform_row(row))
-        except Exception as e:
-            json_log({"error": "RowTransformFailed", "rowNumber": i, "reason": str(e)}, level="ERROR")
-            all_success = False
-            continue
+    async with aiohttp.ClientSession() as session:
+        for i, (_, row) in enumerate(df.iterrows(), start=1):
+            try:
+                batch.append(transform_row(row))
+            except Exception as e:
+                json_log({"error": "RowTransformFailed", "rowNumber": i, "reason": str(e)}, level="ERROR")
+                all_success = False
+                continue
 
-        if len(batch) >= batch_size:
-            success = send_batch(batch, endpoint)
+            if len(batch) >= batch_size:
+                success = await send_batch_async(session, batch, endpoint)
+                all_success = all_success and success
+                batch.clear()
+
+        if batch:
+            success = await send_batch_async(session, batch, endpoint)
             all_success = all_success and success
-            batch.clear()
-
-    if batch:
-        success = send_batch(batch, endpoint)
-        all_success = all_success and success
 
     return all_success
 
 
-# --------------------- Archival processed entity csv files---------------------
+# --------------------- Archival ---------------------
 def archive_files(bucket: str, keys: list, prefix: str):
     archived = []
     failed = []
@@ -197,7 +199,7 @@ def main():
 
     try:
         df, csv_keys = fetch_all_csvs(SOURCE_BUCKET, FOLDER_PREFIX)
-        all_batches_successful = post_batches_to_ddg(df, DDG_ENDPOINT, BATCH_SIZE)
+        all_batches_successful = asyncio.run(post_batches_to_ddg_async(df, DDG_ENDPOINT, BATCH_SIZE))
 
         if all_batches_successful:
             archive_files(SOURCE_BUCKET, csv_keys, FOLDER_PREFIX)
