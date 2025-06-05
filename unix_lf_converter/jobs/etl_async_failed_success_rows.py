@@ -111,35 +111,43 @@ def transform_row(row: pd.Series) -> dict:
 
 
 # --- Async HTTP with retry + backoff ---
+# --- Async HTTP with retry + backoff ---
 async def send_batch_async(session, batch: list, endpoint: str, max_retries: int = 2) -> tuple[bool, str]:
     payload = {"entities_list": batch}
     attempt = 0
-    delay = 2
-    error_message = ""
+    delay = 2  # initial backoff
 
     while attempt <= max_retries:
         try:
             async with session.post(endpoint, json=payload, timeout=30) as resp:
                 if 200 <= resp.status < 300:
-                    json_log({"status": "BatchPosted", "batchSize": len(batch), "statusCode": resp.status,
-                              "attempt": attempt + 1})
+                    json_log({
+                        "status": "BatchPosted",
+                        "batchSize": len(batch),
+                        "statusCode": resp.status,
+                        "attempt": attempt + 1
+                    })
                     return True, ""
                 else:
-                    status = resp.status
-                    reason = await resp.text()
-                    error_message = f"HTTP {status} - {reason.splitlines()[0].strip()}"
-                    raise Exception(error_message)
+                    reason = f"HTTP {resp.status} - {str(resp.reason).splitlines()[0].strip()}"
+                    raise Exception(reason)
         except Exception as e:
             attempt += 1
-            if not error_message:
-                error_message = f"HTTP {getattr(e, 'status', 'Unknown')} - {str(getattr(e, 'reason', str(e))).splitlines()[0].strip()}"
-            json_log({"error": "PostFailed", "attempt": attempt, "batchSize": len(batch), "reason": error_message},
-                     level="ERROR")
+            reason = f"HTTP {getattr(e, 'status', 'Unknown')} - {str(getattr(e, 'reason', str(e))).splitlines()[0].strip()}"
+            json_log({
+                "error": "PostFailed",
+                "attempt": attempt,
+                "batchSize": len(batch),
+                "reason": reason
+            }, level="ERROR")
             if attempt > max_retries:
                 json_log({"critical": "MaxRetriesExceeded", "batchSize": len(batch)}, level="CRITICAL")
-                return False, error_message
+                return False, reason
             await asyncio.sleep(delay)
             delay *= 2
+
+    # fallback return in case all retries are exhausted but not caught above
+    return False, "Unknown failure"
 
 
 # --- Write Failed Rows to S3 ---
