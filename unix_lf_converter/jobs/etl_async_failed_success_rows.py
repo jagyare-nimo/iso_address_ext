@@ -34,7 +34,7 @@ try:
 
     GLUE_JOB_NAME = args['GLUE_JOB_NAME']
     DDG_ENDPOINT = args['DDG_ENDPOINT']
-    BATCH_SIZE = int(args['BATCH_SIZE'])
+    BATCH_SIZE = 2  # -- int(args['BATCH_SIZE'])
     SOURCE_BUCKET = args['SOURCE_BUCKET']
     FOLDER_PREFIX = args['SOURCE_FOLDER_PREFIX']
 
@@ -84,6 +84,7 @@ def fetch_all_csvs(bucket: str, prefix: str):
                         json_log({"warning": "EmptyChunkSkipped", "file": key})
                         continue
                     validate_columns(chunk, key)
+                    chunk["source_file_key"] = key
                     dataframes.append(chunk)
                 processed_keys.append(key)
                 json_log({"info": "CSVLoaded", "file": key})
@@ -114,7 +115,7 @@ def transform_row(row: pd.Series) -> dict:
 # --- Async HTTP with retry + backoff ---
 async def send_batch_async(session, batch: list, endpoint: str, max_retries: int = 2) -> tuple[bool, str]:
     payload = {"entities_list": batch}
-    json_log({"info": "PostingBatchPayload", "batchPayload": payload, "endpoint": endpoint})
+    json_log({"info": "PostingBatchPayload", "batchSize": len(batch), "batchPayload": payload, "endpoint": endpoint})
     attempt = 0
     delay = 2  # initial backoff
 
@@ -126,7 +127,9 @@ async def send_batch_async(session, batch: list, endpoint: str, max_retries: int
                         "status": "BatchPosted",
                         "batchSize": len(batch),
                         "statusCode": resp.status,
-                        "attempt": attempt + 1
+                        "attempt": attempt + 1,
+                        "batchPayload": payload
+
                     })
                     return True, ""
                 else:
@@ -139,7 +142,8 @@ async def send_batch_async(session, batch: list, endpoint: str, max_retries: int
                 "error": "PostFailed",
                 "attempt": attempt,
                 "batchSize": len(batch),
-                "reason": reason
+                "reason": reason,
+                "batchPayload": payload
             }, level="ERROR")
             if attempt > max_retries:
                 json_log({"critical": "MaxRetriesExceeded", "batchSize": len(batch)}, level="CRITICAL")
@@ -152,28 +156,34 @@ async def send_batch_async(session, batch: list, endpoint: str, max_retries: int
 
 
 # --- Write Failed Rows to S3 ---
-def upload_failed_rows_to_s3(failed_rows: list, bucket: str, prefix: str, source_key: str):
+def upload_failed_rows_to_s3(failed_rows: list, bucket: str, prefix: str):
     if not failed_rows:
         return
 
     df = pd.DataFrame(failed_rows)
-    csv_buffer = StringIO()
-    df.to_csv(csv_buffer, index=False)
 
-    original_filename = source_key.split("/")[-1].replace(".csv", "")
-    timestamp = datetime.utcnow().strftime('%Y%m%d%H%M%S')
-    failed_key = f"{prefix}/failed/{original_filename}_failed_rows_{timestamp}.csv"
+    if "source_file_key" not in df.columns:
+        json_log({"error": "Missing source_file_key in failed rows"}, level="ERROR")
+        return
 
-    s3.put_object(Bucket=bucket, Key=failed_key, Body=csv_buffer.getvalue())
+    for source_key, group_df in df.groupby("source_file_key"):
+        csv_buffer = StringIO()
+        group_df.to_csv(csv_buffer, index=False)
 
-    json_log({
-        "uploadFailedRows": {
-            "info": "Failed rows uploaded",
-            "rowCount": len(failed_rows),
-            "s3Key": failed_key,
-            "originalFile": source_key
-        }
-    }, level="WARNING")
+        original_filename = source_key.split("/")[-1].replace(".csv", "")
+        timestamp = datetime.utcnow().strftime('%Y%m%d%H%M%S')
+        failed_key = f"{prefix}/failed/{original_filename}_failed_rows_{timestamp}.csv"
+
+        s3.put_object(Bucket=bucket, Key=failed_key, Body=csv_buffer.getvalue())
+
+        json_log({
+            "uploadFailedRows": {
+                "info": "Failed rows uploaded",
+                "rowCount": len(group_df),
+                "s3Key": failed_key,
+                "originalFile": source_key
+            }
+        }, level="WARNING")
 
 
 # --- Success/Failure Tracking at Row Level to handle Clearer FailureReason ---
