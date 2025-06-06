@@ -37,6 +37,7 @@ try:
     BATCH_SIZE = 2  # -- int(args['BATCH_SIZE'])
     SOURCE_BUCKET = args['SOURCE_BUCKET']
     FOLDER_PREFIX = args['SOURCE_FOLDER_PREFIX']
+    MAX_RETRY = 2  # -- int(args['MAX_RETRY'])
 
 except Exception as e:
     json_log({"error": "Failed to parse Glue arguments", "reason": str(e)}, level="CRITICAL")
@@ -192,6 +193,8 @@ async def post_batches_with_success_tracking(df: pd.DataFrame, endpoint: str, ba
     batch_payload = []
     failed_rows = []
     successful_rows = []
+    failure_streak = 0
+    max_failure_streak = MAX_RETRY
 
     async with aiohttp.ClientSession() as session:
         for i, (_, row) in enumerate(df.iterrows(), start=1):
@@ -210,10 +213,19 @@ async def post_batches_with_success_tracking(df: pd.DataFrame, endpoint: str, ba
                 success, failure_reason = await send_batch_async(session, batch_payload, endpoint)
                 if success:
                     successful_rows.extend(batch_rows)
+                    failure_streak = 0
                 else:
                     for r in batch_rows:
                         r["FailureReason"] = failure_reason
                         failed_rows.append(r)
+                    failure_streak += 1
+                    if failure_streak >= max_failure_streak:
+                        json_log({
+                            "critical": "TooManyConsecutiveFailures",
+                            "streak": failure_streak,
+                            "message": "Aborting batch processing"
+                        }, level="CRITICAL")
+                        break
                 batch_payload.clear()
                 batch_rows.clear()
 
