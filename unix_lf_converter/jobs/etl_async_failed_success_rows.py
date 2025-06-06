@@ -1,11 +1,12 @@
-# --- Original Imports + Async ---
 import json
 import sys
 import uuid
 import asyncio
 from datetime import datetime
 from io import StringIO
+from typing import cast, Any
 
+import pandas.io.common
 import boto3
 import pandas as pd
 import aiohttp
@@ -157,7 +158,7 @@ async def send_batch_async(session, batch: list, endpoint: str, max_retries: int
 
 
 # --- Write Failed Rows to S3 ---
-def upload_failed_rows_to_s3(failed_rows: list, bucket: str, prefix: str):
+def upload_failed_rows_to_s3(failed_rows: list[dict[str, Any]], bucket: str, prefix: str):
     if not failed_rows:
         return
 
@@ -167,13 +168,15 @@ def upload_failed_rows_to_s3(failed_rows: list, bucket: str, prefix: str):
         json_log({"error": "Missing source_file_key in failed rows"}, level="ERROR")
         return
 
-    for source_key, group_df in df.groupby("source_file_key"):
-        csv_buffer = StringIO()
-        group_df.to_csv(csv_buffer, index=False)
-
-        original_filename = source_key.split("/")[-1].replace(".csv", "")
+    for key, group_df in df.groupby("source_file_key"):
+        source_key = str(key)
+        filename_parts = source_key.split("/")
+        original_filename = filename_parts[-1].replace(".csv", "")
         timestamp = datetime.utcnow().strftime('%Y%m%d%H%M%S')
         failed_key = f"{prefix}/failed/{original_filename}_failed_rows_{timestamp}.csv"
+
+        csv_buffer = cast(pandas.io.common.WriteBuffer[str], StringIO())
+        group_df.to_csv(csv_buffer, index=False)
 
         s3.put_object(Bucket=bucket, Key=failed_key, Body=csv_buffer.getvalue())
 
@@ -238,7 +241,8 @@ async def post_batches_with_success_tracking(df: pd.DataFrame, endpoint: str, ba
                     r["FailureReason"] = failure_reason
                     failed_rows.append(r)
 
-    upload_failed_rows_to_s3(failed_rows, SOURCE_BUCKET, FOLDER_PREFIX)
+    dict_failed_rows = [r.to_dict() for r in failed_rows]
+    upload_failed_rows_to_s3(dict_failed_rows, SOURCE_BUCKET, FOLDER_PREFIX)
 
     json_log({
         "BatchPostSummary": {
