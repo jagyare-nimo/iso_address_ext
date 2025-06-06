@@ -2,9 +2,11 @@ import asyncio
 import json
 import sys
 import uuid
+
 from datetime import datetime
-from io import BytesIO
-from typing import Any
+from io import StringIO
+from typing import cast
+from pandas._typing import WriteBuffer
 
 import aiohttp
 import boto3
@@ -157,7 +159,7 @@ async def send_batch_async(session, batch: list, endpoint: str, max_retries: int
 
 
 # --- Write Failed Rows to S3 ---
-def upload_failed_rows_to_s3(failed_rows: list[dict[str, Any]], bucket: str, prefix: str):
+def upload_failed_rows_to_s3(failed_rows: list[dict], bucket: str, prefix: str):
     if not failed_rows:
         return
 
@@ -167,19 +169,18 @@ def upload_failed_rows_to_s3(failed_rows: list[dict[str, Any]], bucket: str, pre
         json_log({"error": "Missing source_file_key in failed rows"}, level="ERROR")
         return
 
-    for key, group_df in df.groupby("source_file_key"):
-        source_key = str(key)
-        filename_parts = source_key.split("/")
-        original_filename = filename_parts[-1].replace(".csv", "")
-        timestamp = datetime.utcnow().strftime('%Y%m%d%H%M%S')
-        failed_key = f"{prefix}/failed/{original_filename}_failed_rows_{timestamp}.csv"
-
-        csv_buffer = BytesIO()
-        group_df.to_csv(csv_buffer, index=False, encoding='utf-8', errors='replace')
-        csv_buffer.seek(0)
-
+    for source_key, group_df in df.groupby("source_file_key"):
         try:
-            s3.put_object(Bucket=bucket, Key=failed_key, Body=csv_buffer.getvalue())
+            buffer = cast(WriteBuffer[str], StringIO())
+            group_df.to_csv(buffer, index=False)
+            buffer.seek(0)
+
+            original_filename = str(source_key).split("/")[-1].replace(".csv", "")
+            timestamp = datetime.utcnow().strftime('%Y%m%d%H%M%S')
+            failed_key = f"{prefix}/failed/{original_filename}_failed_rows_{timestamp}.csv"
+
+            s3.put_object(Bucket=bucket, Key=failed_key, Body=buffer.getvalue())
+
             json_log({
                 "uploadFailedRows": {
                     "info": "Failed rows uploaded",
@@ -187,13 +188,12 @@ def upload_failed_rows_to_s3(failed_rows: list[dict[str, Any]], bucket: str, pre
                     "s3Key": failed_key,
                     "originalFile": source_key
                 }
-            }, level="WARNING")
+            })
         except Exception as exception:
             json_log({
-                "uploadFailedRows": {
-                    "error": f"Failed to upload rows for {original_filename}",
-                    "exception": str(exception)
-                }
+                "error": "FailedUploadFailedRows",
+                "sourceFile": str(source_key),
+                "reason": str(exception)
             }, level="ERROR")
 
 
