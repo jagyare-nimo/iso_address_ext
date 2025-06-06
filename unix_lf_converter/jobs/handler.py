@@ -47,19 +47,23 @@ def get_env_var(key: str, required: bool = True, default: str = None) -> str:
 GLUE_JOB_NAME = get_env_var("GLUE_JOB_NAME")
 DDG_ENDPOINT = get_env_var("DDG_ENDPOINT")
 BATCH_SIZE = get_env_var("BATCH_SIZE", required=False, default="100")
-
-# Regex pattern for folder validation
-DATE_FOLDER_REGEX = re.compile(r"date=(\d{4}-\d{2}-\d{2})")
+SOURCE_FOLDER_PREFIX = get_env_var("SOURCE_FOLDER_PREFIX", required=True)
 
 
 def is_valid_folder(folder_prefix: str, correlation_id: str) -> bool:
-    """Check if folder has a valid date and not a future date"""
-    match = DATE_FOLDER_REGEX.search(folder_prefix)
+    """
+    Validates that the folder path is exactly: {SOURCE_FOLDER_PREFIX}/date=YYYY-MM-DD
+    And that the date equals today (UTC).
+    """
+    escaped_prefix = re.escape(SOURCE_FOLDER_PREFIX)
+    pattern = rf"^{escaped_prefix}/date=(\d{{4}}-\d{{2}}-\d{{2}})$"
+    match = re.match(pattern, folder_prefix)
+
     if not match:
         json_log({
-            "warning": "InvalidFolderPattern",
+            "warning": "InvalidFolderFormat",
             "folderPrefix": folder_prefix,
-            "expectedPattern": "date=YYYY-MM-DD",
+            "expectedPattern": f"{SOURCE_FOLDER_PREFIX}/date=YYYY-MM-DD",
             "correlationId": correlation_id
         }, level=logging.WARNING)
         return False
@@ -68,11 +72,12 @@ def is_valid_folder(folder_prefix: str, correlation_id: str) -> bool:
     try:
         folder_date = datetime.strptime(date_str, "%Y-%m-%d").date()
         today = datetime.utcnow().date()
-        if folder_date > today:
+        if folder_date != today:
             json_log({
-                "warning": "FutureDateDetected",
+                "warning": "DateMismatch",
                 "folderPrefix": folder_prefix,
-                "date": date_str,
+                "dateFound": date_str,
+                "expectedDate": str(today),
                 "correlationId": correlation_id
             }, level=logging.WARNING)
             return False
