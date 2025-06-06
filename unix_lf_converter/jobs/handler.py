@@ -71,21 +71,23 @@ def is_valid_folder(folder_prefix: str, correlation_id: str) -> bool:
     date_str = match.group(1)
     try:
         folder_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-        today = datetime.utcnow().date()
-        if folder_date != today:
-            json_log({
-                "warning": "DateMismatch",
-                "folderPrefix": folder_prefix,
-                "dateFound": date_str,
-                "expectedDate": str(today),
-                "correlationId": correlation_id
-            }, level=logging.WARNING)
-            return False
-    except ValueError:
+    except ValueError as ve:
         json_log({
-            "warning": "InvalidDateFormat",
+            "warning": "DateParsingError",
             "folderPrefix": folder_prefix,
             "date": date_str,
+            "correlationId": correlation_id,
+            "reason": str(ve)
+        }, level=logging.WARNING)
+        return False
+
+    today = datetime.utcnow().date()
+    if folder_date != today:
+        json_log({
+            "warning": "DateMismatch",
+            "folderPrefix": folder_prefix,
+            "dateFound": date_str,
+            "expectedDate": str(today),
             "correlationId": correlation_id
         }, level=logging.WARNING)
         return False
@@ -163,13 +165,22 @@ def lambda_handler(event, context):
 
             folder_prefix = str(Path(key).parent)
 
-            # Validate folder format and prevent duplicates
+            # Avoid re-processing the same folder
             folder_id = f"{bucket}/{folder_prefix}"
             if folder_id in seen_folders:
                 continue
             seen_folders.add(folder_id)
 
-            if not is_valid_folder(folder_prefix, correlation_id):
+            try:
+                if not is_valid_folder(folder_prefix, correlation_id):
+                    continue
+            except ValueError as e:
+                json_log({
+                    "warning": "FolderValidationFailed",
+                    "folderPrefix": folder_prefix,
+                    "correlationId": correlation_id,
+                    "reason": str(e)
+                }, level=logging.WARNING)
                 continue
 
             try:
@@ -179,20 +190,13 @@ def lambda_handler(event, context):
                     "jobRunId": job_run_id
                 })
             except Exception:
-                continue  # Already logged
+                continue
 
-        if triggered_jobs:
-            response = {
-                "statusCode": 200,
-                "body": f"{len(triggered_jobs)} Glue job(s) triggered.",
-                "details": triggered_jobs
-            }
-        else:
-            response = {
-                "statusCode": 207,
-                "body": "No Glue job was triggered.",
-                "details": []
-            }
+        response = {
+            "statusCode": 200 if triggered_jobs else 207,
+            "body": f"{len(triggered_jobs)} Glue job(s) triggered." if triggered_jobs else "No Glue job was triggered.",
+            "details": triggered_jobs
+        }
 
         json_log({**response, "correlationId": correlation_id})
         return response
