@@ -1,15 +1,14 @@
+import asyncio
 import json
 import sys
 import uuid
-import asyncio
 from datetime import datetime
-from io import StringIO
-from typing import cast, Any
+from io import BytesIO
+from typing import Any
 
-import pandas.io.common
+import aiohttp
 import boto3
 import pandas as pd
-import aiohttp
 from awsglue.utils import getResolvedOptions
 
 
@@ -175,19 +174,27 @@ def upload_failed_rows_to_s3(failed_rows: list[dict[str, Any]], bucket: str, pre
         timestamp = datetime.utcnow().strftime('%Y%m%d%H%M%S')
         failed_key = f"{prefix}/failed/{original_filename}_failed_rows_{timestamp}.csv"
 
-        csv_buffer = cast(pandas.io.common.WriteBuffer[str], StringIO())
-        group_df.to_csv(csv_buffer, index=False)
+        csv_buffer = BytesIO()
+        group_df.to_csv(csv_buffer, index=False, encoding='utf-8', errors='replace')
+        csv_buffer.seek(0)
 
-        s3.put_object(Bucket=bucket, Key=failed_key, Body=csv_buffer.getvalue())
-
-        json_log({
-            "uploadFailedRows": {
-                "info": "Failed rows uploaded",
-                "rowCount": len(group_df),
-                "s3Key": failed_key,
-                "originalFile": source_key
-            }
-        }, level="WARNING")
+        try:
+            s3.put_object(Bucket=bucket, Key=failed_key, Body=csv_buffer.getvalue())
+            json_log({
+                "uploadFailedRows": {
+                    "info": "Failed rows uploaded",
+                    "rowCount": len(group_df),
+                    "s3Key": failed_key,
+                    "originalFile": source_key
+                }
+            }, level="WARNING")
+        except Exception as exception:
+            json_log({
+                "uploadFailedRows": {
+                    "error": f"Failed to upload rows for {original_filename}",
+                    "exception": str(exception)
+                }
+            }, level="ERROR")
 
 
 # --- Success/Failure Tracking at Row Level to handle Clearer FailureReason ---
