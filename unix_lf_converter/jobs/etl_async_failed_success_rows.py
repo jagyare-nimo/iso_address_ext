@@ -272,9 +272,6 @@ async def post_batches_with_success_tracking(df: pd.DataFrame, endpoint: str, ba
                     r["FailureReason"] = failure_reason
                     failed_rows.append(r)
 
-    dict_failed_rows = [r.to_dict() for r in failed_rows]
-    upload_failed_rows_to_s3(dict_failed_rows, SOURCE_BUCKET, FOLDER_PREFIX)
-
     json_log({
         "BatchPostSummary": {
             "summary": "BatchPostSummary",
@@ -301,33 +298,40 @@ def archive_files(bucket: str, keys: list, prefix: str):
             s3.delete_object(Bucket=bucket, Key=key)
 
             archived.append(archive_key)
+
+            json_log({
+                "archiveSummary": {
+                    "attempted": len(keys),
+                    "successfulCount": len(archived),
+                    "failedCount": len(failed),
+                    "failedFiles": failed
+                }
+            })
+
         except Exception as exception:
             json_log({"error": "ArchiveFailed", "file": key, "reason": str(exception)}, level="ERROR")
             failed.append(key)
 
-    json_log({
-        "archiveSummary": {
-            "attempted": len(keys),
-            "successfulCount": len(archived),
-            "failedCount": len(failed),
-            "failedFiles": failed
-        }
-    })
-
 
 def main():
     job_id = f"{GLUE_JOB_NAME}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
-    json_log({"action": "JobStart", "jobId": job_id, "bucket": SOURCE_BUCKET, "prefix": FOLDER_PREFIX})
+    json_log({"action": "JobStart", "jobId": job_id,  "bucket": SOURCE_BUCKET, "prefix": FOLDER_PREFIX})
 
     try:
         df, csv_keys = fetch_all_csvs(SOURCE_BUCKET, FOLDER_PREFIX)
-        successful_rows, failed_rows = asyncio.run(post_batches_with_success_tracking(df, DDG_ENDPOINT, BATCH_SIZE))
+        successful_rows, failed_rows = asyncio.run(
+            post_batches_with_success_tracking(df, DDG_ENDPOINT, BATCH_SIZE)
+        )
 
         archive_files(SOURCE_BUCKET, csv_keys, FOLDER_PREFIX)
 
+        if failed_rows:
+            dict_failed_rows = [r.to_dict() for r in failed_rows]
+            upload_failed_rows_to_s3(dict_failed_rows, SOURCE_BUCKET, FOLDER_PREFIX)
+
         json_log({
             "jobDetails": {
-                "status": "JobCompleted",
+                "status": "Job Completed",
                 "jobId": job_id,
                 "rowCount": len(df),
                 "successfulRows": len(successful_rows),
@@ -337,8 +341,17 @@ def main():
                 "processedFiles": csv_keys
             }
         })
+
     except Exception as exception:
-        json_log({"status": "JobFailed", "jobId": job_id, "reason": str(exception)}, level="CRITICAL")
+        json_log({
+            "jobDetails": {
+                "status": "Job Failed",
+                "jobId": job_id,
+                "bucket": SOURCE_BUCKET,
+                "prefix": FOLDER_PREFIX,
+                "reason": str(exception)
+            }
+        }, level="CRITICAL")
         raise
 
 
