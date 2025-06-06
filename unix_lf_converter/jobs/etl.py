@@ -94,8 +94,8 @@ def fetch_all_csvs(bucket: str, prefix: str):
 
                 json_log({"info": "CSVLoaded", "file": key, "rows": len(df)})
 
-            except Exception as e:
-                json_log({"error": "FailedToReadCSV", "file": key, "reason": str(e)}, level="ERROR")
+            except Exception as exception:
+                json_log({"error": "FailedToReadCSV", "file": key, "reason": str(exception)}, level="ERROR")
 
     if not dataframes:
         json_log({"error": "NoValidCSVsFound", "bucket": bucket, "prefix": prefix}, level="WARNING")

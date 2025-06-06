@@ -7,6 +7,7 @@ from datetime import datetime
 from io import StringIO
 from typing import cast
 from pandas._typing import WriteBuffer
+from io import StringIO, TextIOBase
 
 import aiohttp
 import boto3
@@ -61,11 +62,12 @@ REQUIRED_COLUMNS = [
 s3 = boto3.client('s3')
 
 
-def validate_columns(df: pd.DataFrame, file_key: str):
+def validate_columns(df: pd.DataFrame, file_key: str) -> bool:
     missing = [col for col in REQUIRED_COLUMNS if col not in df.columns]
     if missing:
         json_log({"error": "MissingRequiredColumns", "file": file_key, "missingColumns": missing}, level="ERROR")
-        raise ValueError(f"File {file_key} is missing required columns: {missing}")
+        return False
+    return True
 
 
 def fetch_all_csvs(bucket: str, prefix: str):
@@ -78,25 +80,43 @@ def fetch_all_csvs(bucket: str, prefix: str):
     for page in pages:
         for obj in page.get('Contents', []):
             key = obj['Key']
-            if not key.endswith('.csv'):
+
+            if not key.endswith('.csv') or '/' in key[len(prefix) + 1:]:
                 continue
+
             try:
                 response = s3.get_object(Bucket=bucket, Key=key)
+
                 for chunk in pd.read_csv(response['Body'], chunksize=5000):
                     if chunk.empty:
                         json_log({"warning": "EmptyChunkSkipped", "file": key})
                         continue
-                    validate_columns(chunk, key)
+
+                    if not validate_columns(chunk, key):
+                        json_log({"warning": "InvalidColumnsSkipped", "file": key})
+                        break
+
                     chunk["source_file_key"] = key
                     dataframes.append(chunk)
+
                 processed_keys.append(key)
                 json_log({"info": "CSVLoaded", "file": key})
+
             except Exception as e:
-                json_log({"error": "FailedToReadCSV", "file": key, "reason": str(e)}, level="ERROR")
+                json_log({
+                    "error": "FailedToReadCSV",
+                    "file": key,
+                    "reason": str(e)
+                }, level="ERROR")
 
     if not dataframes:
-        json_log({"error": "NoValidCSVsFound", "bucket": bucket, "prefix": prefix}, level="WARNING")
-        raise ValueError(f"No valid CSVs found under s3://{bucket}/{prefix}/")
+        json_log({
+            "warning": "NoValidCSVsFound",
+            "bucket": bucket,
+            "prefix": prefix,
+            "message": "No valid CSVs found; continuing job without processing."
+        }, level="WARNING")
+        return pd.DataFrame(), []
 
     return pd.concat(dataframes, ignore_index=True), processed_keys
 
@@ -138,9 +158,11 @@ async def send_batch_async(session, batch: list, endpoint: str, max_retries: int
                 else:
                     reason = f"HTTP {resp.status} - {str(resp.reason).splitlines()[0].strip()}"
                     raise Exception(reason)
-        except Exception as e:
+        except Exception as err_:
             attempt += 1
-            reason = f"HTTP {getattr(e, 'status', 'Unknown')} - {str(getattr(e, 'reason', str(e))).splitlines()[0].strip()}"
+            raw_resp = str(getattr(err_, 'reason', '')).strip()
+            short_resp = raw_resp.splitlines()[0].strip() if raw_resp else "Couldn't get response"
+            reason = f"HTTP {getattr(err_, 'status', 'Unknown')} - {short_resp}"
             json_log({
                 "error": "PostFailed",
                 "attempt": attempt,
@@ -214,7 +236,9 @@ async def post_batches_with_success_tracking(df: pd.DataFrame, endpoint: str, ba
                 row["RequestId"] = transformed["RequestId"]
                 batch_rows.append(row)
             except Exception as err_:
-                fail_resp = f"HTTP {getattr(err_, 'status', 'Unknown')} - {str(getattr(err_, 'reason', '')).splitlines()[0].strip()}"
+                raw_resp = str(getattr(err_, 'reason', '')).strip()
+                short_resp = raw_resp.splitlines()[0].strip() if raw_resp else "Couldn't get response"
+                fail_resp = f"HTTP {getattr(err_, 'status', 'Unknown')} - {short_resp}"
                 row["FailureReason"] = fail_resp
                 failed_rows.append(row)
                 continue
@@ -277,8 +301,8 @@ def archive_files(bucket: str, keys: list, prefix: str):
             s3.delete_object(Bucket=bucket, Key=key)
 
             archived.append(archive_key)
-        except Exception as e:
-            json_log({"error": "ArchiveFailed", "file": key, "reason": str(e)}, level="ERROR")
+        except Exception as exception:
+            json_log({"error": "ArchiveFailed", "file": key, "reason": str(exception)}, level="ERROR")
             failed.append(key)
 
     json_log({
